@@ -3,6 +3,7 @@ import { SessionPersistence } from "../persistence/session-store.js";
 import { AIClient } from "./ai-client.js";
 import type { PermissionHook } from "./permission-hook.js";
 import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
+import type { Logger } from "../logging/logger.js";
 
 export interface ManagedSession {
   channelId: string;
@@ -16,7 +17,7 @@ export class SessionManager {
   private sessionStore: SessionPersistence;
   private permissionHook: PermissionHook | null = null;
 
-  constructor(private config: BotConfig) {
+  constructor(private config: BotConfig, private logger: Logger) {
     this.sessionStore = new SessionPersistence(config.sessionPersistPath);
   }
 
@@ -37,7 +38,7 @@ export class SessionManager {
           isProcessing: false,
           lastActivity: new Date(),
         });
-        console.log(`[SESSION] Loaded persisted session for channel ${channelId}`);
+        this.logger.debug('💾 SESSION', `Loaded persisted session for channel ${channelId}`);
       }
     }
   }
@@ -67,9 +68,9 @@ export class SessionManager {
       this.activeSessions.set(channelId, session);
 
       if (persistedId) {
-        console.log(`[SESSION] Resuming session ${persistedId} for channel ${channelId}`);
+        this.logger.info('💾 SESSION', `Resuming session for channel ${channelId.slice(-6)}`, `ID: ${persistedId.slice(0, 8)}`);
       } else {
-        console.log(`[SESSION] Creating new session for channel ${channelId}`);
+        this.logger.info('💾 SESSION', `Creating new session for channel ${channelId.slice(-6)}`);
       }
     }
 
@@ -92,12 +93,12 @@ export class SessionManager {
       session.sdkSessionId || undefined,
       {
         onSessionInit: (sessionId) => {
-          console.log(`[SESSION] Got session ID: ${sessionId}`);
+          this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
           session.sdkSessionId = sessionId;
           this.sessionStore.setSessionId(channelId, sessionId);
           // Persist immediately
           this.sessionStore.save().catch((err) =>
-            console.error("[SESSION] Failed to persist:", err)
+            this.logger.error('💾 SESSION', 'Failed to persist', err.message)
           );
         },
       }
@@ -125,7 +126,7 @@ export class SessionManager {
     this.sessionStore.clearSession(channelId);
     await this.sessionStore.save();
 
-    console.log(`[SESSION] Cleared session for channel ${channelId}`);
+    this.logger.info('💾 SESSION', `Cleared session for channel ${channelId.slice(-6)}`);
   }
 
   async compactSession(channelId: string): Promise<boolean> {
@@ -137,7 +138,7 @@ export class SessionManager {
 
     // The SDK handles compaction internally
     // We just need to continue using the same session
-    console.log(`[SESSION] Compact requested for channel ${channelId}`);
+    this.logger.info('💾 SESSION', `Compact requested for channel ${channelId.slice(-6)}`);
     return true;
   }
 }

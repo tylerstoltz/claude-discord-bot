@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
+import type { LogLevel } from "./logging/logger.js";
 
 export interface BotConfig {
   discordToken: string;
@@ -17,6 +18,29 @@ export interface BotConfig {
   randomMessageChannels: string[];
   randomMessagePrompt: string;
   permissionTimeoutMs: number;
+
+  // Logging configuration
+  logLevel: LogLevel;
+  logTimestamps: boolean;
+  logColors: boolean;
+
+  // Guild ID for faster slash command registration (optional)
+  guildId?: string;
+
+  // Attachment configuration
+  attachments: {
+    enabled: boolean;
+    maxImageSize: number;
+    supportedImageTypes: string[];
+  };
+
+  // File download configuration
+  fileDownload: {
+    enabled: boolean;
+    autoDownload: boolean;
+    maxFileSize: number;
+    allowedExtensions: string[];
+  };
 }
 
 const defaultConfig: BotConfig = {
@@ -35,6 +59,26 @@ const defaultConfig: BotConfig = {
   randomMessageChannels: [],
   randomMessagePrompt: "Share something interesting or helpful.",
   permissionTimeoutMs: 60000,
+
+  // Logging defaults
+  logLevel: "info",
+  logTimestamps: true,
+  logColors: true,
+
+  // Attachment defaults
+  attachments: {
+    enabled: true,
+    maxImageSize: 5 * 1024 * 1024, // 5 MB
+    supportedImageTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"]
+  },
+
+  // File download defaults
+  fileDownload: {
+    enabled: true,
+    autoDownload: true,
+    maxFileSize: 8 * 1024 * 1024, // 8 MB (Discord free tier limit)
+    allowedExtensions: [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log"]
+  }
 };
 
 export function loadConfig(configPath?: string): BotConfig {

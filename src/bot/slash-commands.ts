@@ -5,6 +5,7 @@ import {
   Routes,
 } from "discord.js";
 import type { SessionManager } from "../agent/session-manager.js";
+import type { Logger } from "../logging/logger.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -18,22 +19,28 @@ export const commands = [
     .setDescription("Show the current session status"),
 ];
 
-export async function registerCommands(token: string, clientId: string): Promise<void> {
+export async function registerCommands(token: string, clientId: string, guildId?: string): Promise<void> {
   const rest = new REST().setToken(token);
 
+  const route = guildId
+    ? Routes.applicationGuildCommands(clientId, guildId)
+    : Routes.applicationCommands(clientId);
+
+  const scope = guildId ? `guild ${guildId.slice(-6)}` : 'global';
+
   try {
-    console.log("Registering slash commands...");
-    await rest.put(Routes.applicationCommands(clientId), {
+    console.log(`Registering slash commands (${scope})...`);
+    await rest.put(route, {
       body: commands.map((cmd) => cmd.toJSON()),
     });
-    console.log("Slash commands registered successfully.");
+    console.log(`Slash commands registered successfully (${scope}).`);
   } catch (error) {
     console.error("Failed to register slash commands:", error);
   }
 }
 
 export class SlashCommandHandler {
-  constructor(private sessionManager: SessionManager) {}
+  constructor(private sessionManager: SessionManager, private logger?: Logger) {}
 
   async handleInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
     const channelId = interaction.channelId;

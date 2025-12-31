@@ -14,6 +14,8 @@ import { SessionManager } from "../agent/session-manager.js";
 import { MessageHandler } from "./message-handler.js";
 import { SlashCommandHandler, registerCommands } from "./slash-commands.js";
 import { PermissionHook } from "../agent/permission-hook.js";
+import { Logger } from "../logging/logger.js";
+import { ActivityManager } from "./activity-manager.js";
 
 export class DiscordBot {
   private client: Client;
@@ -21,8 +23,12 @@ export class DiscordBot {
   private messageHandler!: MessageHandler;
   private slashCommandHandler!: SlashCommandHandler;
   private permissionHook!: PermissionHook;
+  private logger: Logger;
+  private activityManager!: ActivityManager;
 
   constructor(private config: BotConfig) {
+    this.logger = new Logger(config.logLevel, config.logTimestamps, config.logColors);
+
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -32,19 +38,23 @@ export class DiscordBot {
       ],
     });
 
-    this.sessionManager = new SessionManager(config);
+    this.sessionManager = new SessionManager(config, this.logger);
 
     this.setupEventHandlers();
   }
 
   private setupEventHandlers(): void {
     this.client.once(Events.ClientReady, async (readyClient) => {
-      console.log(`[BOT] Logged in as ${readyClient.user.tag}`);
+      this.logger.info('🤖 BOT', `Logged in as ${readyClient.user.tag}`);
+
+      // Initialize activity manager
+      this.activityManager = new ActivityManager(this.client);
 
       // Initialize components that need the bot user ID
       this.permissionHook = new PermissionHook(
         this.config,
-        (channelId) => this.client.channels.cache.get(channelId) as any
+        (channelId) => this.client.channels.cache.get(channelId) as any,
+        this.logger
       );
 
       this.sessionManager.setPermissionHook(this.permissionHook);
@@ -52,18 +62,20 @@ export class DiscordBot {
       this.messageHandler = new MessageHandler(
         this.config,
         this.sessionManager,
-        readyClient.user.id
+        readyClient.user.id,
+        this.logger,
+        this.activityManager
       );
 
-      this.slashCommandHandler = new SlashCommandHandler(this.sessionManager);
+      this.slashCommandHandler = new SlashCommandHandler(this.sessionManager, this.logger);
 
       // Register slash commands
-      await registerCommands(this.config.discordToken, readyClient.user.id);
+      await registerCommands(this.config.discordToken, readyClient.user.id, this.config.guildId);
 
       // Load persisted sessions
       await this.sessionManager.loadPersistedSessions();
 
-      console.log("[BOT] Ready to receive messages.");
+      this.logger.info('🤖 BOT', 'Ready to receive messages');
     });
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
@@ -110,19 +122,19 @@ export class DiscordBot {
     );
 
     this.client.on(Events.Error, (error) => {
-      console.error("[BOT] Discord client error:", error);
+      this.logger.error('🤖 BOT', 'Discord client error', error.message);
     });
   }
 
   async start(): Promise<void> {
-    console.log("[BOT] Connecting to Discord...");
+    this.logger.info('🤖 BOT', 'Connecting to Discord...');
     await this.client.login(this.config.discordToken);
   }
 
   async shutdown(): Promise<void> {
-    console.log("[BOT] Saving sessions...");
+    this.logger.info('🤖 BOT', 'Saving sessions...');
     await this.sessionManager.persistSessions();
-    console.log("[BOT] Disconnecting...");
+    this.logger.info('🤖 BOT', 'Disconnecting...');
     this.client.destroy();
   }
 

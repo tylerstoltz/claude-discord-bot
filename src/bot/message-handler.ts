@@ -2,6 +2,8 @@ import { Message, TextChannel } from "discord.js";
 import type { BotConfig } from "../config.js";
 import type { SessionManager } from "../agent/session-manager.js";
 import { ChunkedUpdater } from "../streaming/chunked-updater.js";
+import type { Logger } from "../logging/logger.js";
+import type { ActivityManager } from "./activity-manager.js";
 
 export class MessageHandler {
   private processingMessages = new Set<string>();
@@ -9,7 +11,9 @@ export class MessageHandler {
   constructor(
     private config: BotConfig,
     private sessionManager: SessionManager,
-    private botUserId: string
+    private botUserId: string,
+    private logger: Logger,
+    private activityManager: ActivityManager
   ) {}
 
   async handleMessage(message: Message): Promise<void> {
@@ -48,14 +52,20 @@ export class MessageHandler {
         return;
       }
 
-      console.log(`[MSG] Processing: "${cleanedContent.slice(0, 100)}..."`);
+      const startTime = Date.now();
+      this.logger.channelActivity(message.channelId, 'RECEIVED', cleanedContent.slice(0, 100));
+
+      // Update bot status
+      this.activityManager.setStatus('thinking');
 
       // Create chunked updater for streaming response
       const updater = new ChunkedUpdater(
         channel,
         message,
         this.config.updateIntervalMs,
-        this.config.maxMessageLength
+        this.config.maxMessageLength,
+        this.logger,
+        this.activityManager
       );
 
       try {
@@ -71,11 +81,16 @@ export class MessageHandler {
 
         // Finalize the response
         await updater.finalize();
+
+        // Calculate duration and log completion
+        const duration = Date.now() - startTime;
+        this.logger.complete(duration);
       } catch (error) {
-        console.error("[MSG] Error processing message:", error);
+        this.logger.error('💬 MSG', 'Error processing message', (error as Error).message);
         await updater.sendError(`Error: ${(error as Error).message}`);
       } finally {
         session.isProcessing = false;
+        this.activityManager.reset();
       }
     } finally {
       this.processingMessages.delete(message.id);

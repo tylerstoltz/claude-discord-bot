@@ -1,5 +1,7 @@
 import { Message, TextChannel } from "discord.js";
 import { splitMessage, formatStreamingMessage } from "./message-splitter.js";
+import type { Logger } from "../logging/logger.js";
+import type { ActivityManager } from "../bot/activity-manager.js";
 
 export class ChunkedUpdater {
   private currentMessage: Message | null = null;
@@ -15,11 +17,15 @@ export class ChunkedUpdater {
     private channel: TextChannel,
     private replyTo: Message,
     private updateIntervalMs: number = 3000,
-    private maxMessageLength: number = 2000
+    private maxMessageLength: number = 2000,
+    private logger?: Logger,
+    private activityManager?: ActivityManager
   ) {}
 
   appendContent(content: string): void {
     this.contentBuffer += content;
+    this.logger?.streaming(this.contentBuffer.length);
+    this.activityManager?.setStatus('writing');
     this.scheduleUpdate();
   }
 
@@ -32,6 +38,9 @@ export class ChunkedUpdater {
     } catch {
       inputPreview = String(toolInput).slice(0, 100);
     }
+
+    this.logger?.toolUse(toolName, inputPreview);
+    this.activityManager?.setStatus('working');
 
     this.contentBuffer += `\n\n> **Using:** \`${toolName}\`\n> ${inputPreview}\n\n`;
 
@@ -94,12 +103,12 @@ export class ChunkedUpdater {
         this.consecutiveRateLimits++;
         const backoff = this.rateLimitBackoffMs * Math.pow(2, this.consecutiveRateLimits - 1);
 
-        console.warn(`[STREAM] Rate limited, backing off ${backoff}ms`);
+        this.logger?.warn('✍️  STREAM', `Rate limited, backing off ${backoff}ms`);
 
         await this.sleep(backoff);
         this.pendingUpdate = true;
       } else {
-        console.error("[STREAM] Error updating message:", error);
+        this.logger?.error('✍️  STREAM', 'Error updating message', (error as Error).message);
       }
     } finally {
       this.isEditing = false;
@@ -112,6 +121,9 @@ export class ChunkedUpdater {
   }
 
   async finalize(): Promise<void> {
+    // Clear streaming indicator
+    this.logger?.streamingComplete();
+
     // Clear any pending timer
     if (this.updateTimer) {
       clearTimeout(this.updateTimer);
@@ -136,13 +148,13 @@ export class ChunkedUpdater {
         try {
           await this.currentMessage.edit(finalContent);
         } catch (error) {
-          console.error("[STREAM] Failed to edit final message:", error);
+          this.logger?.error('✍️  STREAM', 'Failed to edit final message', (error as Error).message);
         }
       } else {
         try {
           await this.replyTo.reply(finalContent);
         } catch (error) {
-          console.error("[STREAM] Failed to send final message:", error);
+          this.logger?.error('✍️  STREAM', 'Failed to send final message', (error as Error).message);
         }
       }
     } else {
@@ -164,7 +176,7 @@ export class ChunkedUpdater {
             await this.channel.send(chunk);
           }
         } catch (error) {
-          console.error(`[STREAM] Failed to send chunk ${i}:`, error);
+          this.logger?.error('✍️  STREAM', `Failed to send chunk ${i}`, (error as Error).message);
         }
 
         // Small delay between messages to avoid rate limits
@@ -188,7 +200,7 @@ export class ChunkedUpdater {
         await this.replyTo.reply(formatted);
       }
     } catch (error) {
-      console.error("[STREAM] Failed to send error message:", error);
+      this.logger?.error('✍️  STREAM', 'Failed to send error message', (error as Error).message);
     }
   }
 

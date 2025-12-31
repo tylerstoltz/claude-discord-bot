@@ -7,6 +7,7 @@ import {
   ButtonInteraction,
 } from "discord.js";
 import type { BotConfig } from "../config.js";
+import type { Logger } from "../logging/logger.js";
 
 interface PendingApproval {
   toolUseId: string;
@@ -23,7 +24,8 @@ export class PermissionHook {
 
   constructor(
     private config: BotConfig,
-    private getChannel: (channelId: string) => TextChannel | null
+    private getChannel: (channelId: string) => TextChannel | null,
+    private logger: Logger
   ) {}
 
   createHookHandler(channelId: string) {
@@ -41,7 +43,7 @@ export class PermissionHook {
 
       const channel = this.getChannel(channelId);
       if (!channel) {
-        console.error(`[PERMISSION] Channel ${channelId} not found`);
+        this.logger.error('🔒 PERMISSION', `Channel ${channelId.slice(-6)} not found`);
         return {
           decision: "block",
           stopReason: "Cannot request permission: channel not found",
@@ -51,15 +53,15 @@ export class PermissionHook {
 
       const id = toolUseId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-      console.log(`[PERMISSION] Requesting approval for ${toolName} (${id})`);
+      this.logger.info('🔒 PERMISSION', `Requesting approval for ${toolName}`, `ID: ${id.slice(0, 8)}`);
 
       const approved = await this.requestApproval(channel, toolName, toolInput, id);
 
       if (approved) {
-        console.log(`[PERMISSION] Approved: ${toolName}`);
+        this.logger.info('🔒 PERMISSION', `Approved: ${toolName}`);
         return { decision: "approve", continue: true };
       } else {
-        console.log(`[PERMISSION] Denied: ${toolName}`);
+        this.logger.warn('🔒 PERMISSION', `Denied: ${toolName}`);
         return {
           decision: "block",
           stopReason: "User denied permission for this operation",
