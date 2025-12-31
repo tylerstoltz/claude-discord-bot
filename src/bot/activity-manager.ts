@@ -9,14 +9,15 @@ export class ActivityManager {
 
   constructor(private client: Client) {}
 
-  setStatus(status: BotActivityStatus): void {
-    // Throttle updates to avoid rate limits
-    const now = Date.now();
-    if (now - this.lastUpdate < this.updateThrottleMs) {
+  setStatus(status: BotActivityStatus, force: boolean = false): void {
+    // Check if already at this status
+    if (this.currentStatus === status && !force) {
       return;
     }
 
-    if (this.currentStatus === status) {
+    // Throttle updates to avoid rate limits (unless forced)
+    const now = Date.now();
+    if (!force && now - this.lastUpdate < this.updateThrottleMs) {
       return;
     }
 
@@ -34,6 +35,7 @@ export class ActivityManager {
   }
 
   reset(): void {
-    this.setStatus('idle');
+    // Force the reset to bypass throttling - we always want to return to idle
+    this.setStatus('idle', true);
   }
 }
