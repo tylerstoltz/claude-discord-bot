@@ -4,11 +4,12 @@ A Discord bot that gives Claude Code full autonomous control of a machine, using
 
 ## Features
 
-- **Persistent Sessions**: Conversations persist across bot restarts
-- **Permission Approval via Discord**: Dangerous operations (Bash, Write, Edit) require approval via Discord buttons
-- **Chunked Streaming**: Real-time updates as Claude works, with message editing instead of spam
+- **Persistent Sessions**: Conversations persist across bot restarts (per-channel based)
+- **Permission Approval via Discord**: Dangerous operations require approval via interactive buttons + reaction fallback
+- **Chunked Streaming**: Real-time updates as Claude works, with smart message editing and rate-limit handling
 - **Slash Commands**: `/compact` and `/clear` for session management
 - **Full Agent Control**: Claude can use all tools (Bash, Read, Write, Edit, etc.)
+- **Dual Interaction System**: Both modern buttons and classic reactions for maximum compatibility
 
 ## Setup
 
@@ -54,14 +55,103 @@ A Discord bot that gives Claude Code full autonomous control of a machine, using
 - `/clear` - Clear session and start fresh
 - `/status` - Show session info
 
-## Permission Flow
+## Session Management
 
-When Claude wants to run a dangerous tool (Bash, Write, Edit):
+### Per-Channel Sessions
+- Each Discord channel maintains its own independent AI conversation
+- Multiple users in the same channel share the same conversation context
+- Different channels are completely isolated from each other
+- Sessions persist to disk (`data/sessions.json`) and survive bot restarts
 
-1. Bot sends an embed with the command details
-2. User clicks **Approve** or **Deny** buttons
-3. Claude proceeds or stops based on the decision
-4. 60-second timeout defaults to deny
+### Session Lifecycle
+```
+First message in channel → Create new session → Get SDK session ID
+Subsequent messages     → Resume with existing session ID
+Bot restart             → Load persisted sessions from disk
+/clear command          → Wipe session for that channel
+```
+
+## Chunked Streaming Response
+
+The bot uses smart message editing to provide real-time updates:
+
+### How it Works
+1. **Initial Reply**: Bot replies to your message with streaming content
+2. **Live Updates**: Same message is edited every ~3 seconds with new content
+3. **Tool Indicators**: Shows immediately when Claude uses a tool (Read, Bash, etc.)
+4. **Rate Limiting**:
+   - Exponential backoff on Discord rate limits (1s → 2s → 4s...)
+   - Queues updates if editing is in progress
+5. **Finalization**:
+   - Content ≤2000 chars: Single final edit
+   - Content >2000 chars: Splits into multiple messages
+
+### Visual Indicators
+- `⏳` reaction: Bot is busy processing another request
+- **> Using: `ToolName`** - Shows which tool Claude is using in real-time
+
+## Permission Approval System
+
+When Claude wants to run a dangerous tool (Bash, Write, Edit), a dual approval system is used:
+
+### Approval Embed (Both Methods Work)
+1. **Interactive Buttons** (Primary):
+   - ✅ **Approve** button (green)
+   - ❌ **Deny** button (red)
+   - Click once, buttons disappear after decision
+
+2. **Emoji Reactions** (Fallback):
+   - ✅ checkmark reaction
+   - ❌ X reaction
+   - Click emoji to approve/deny
+
+### Approval Flow
+1. Claude requests dangerous operation (e.g., `Bash` command)
+2. Bot sends orange-colored embed with:
+   - Tool name and JSON input preview
+   - Both interactive buttons AND emoji reactions
+   - Countdown timer in footer
+3. User responds via button click OR emoji reaction
+4. Embed updates with result:
+   - 🟢 Green = Approved
+   - 🔴 Red = Denied
+   - ⚪ Gray = Timeout (auto-deny after 60 seconds)
+5. Claude continues or stops based on decision
+
+## Discord Features Used
+
+The bot leverages these Discord.js capabilities:
+
+### Messages
+- `message.reply()` - Reply to user messages
+- `message.edit()` - Edit messages for live streaming updates
+- `channel.send()` - Send follow-up messages
+- `channel.sendTyping()` - Show "bot is typing..." indicator
+
+### Reactions & Emojis
+- `message.react(emoji)` - Add reactions (⏳ for busy, ✅/❌ for approvals)
+- Listen to `MessageReactionAdd` events for user reactions
+
+### Rich Embeds
+- `EmbedBuilder` - Formatted messages with colors, fields, timestamps
+- Color-coded approval states (orange → green/red/gray)
+
+### Interactive Components
+- `ButtonBuilder` - Clickable buttons (Success/Danger styles)
+- `ActionRowBuilder` - Container for button groups
+- Button interaction handling via `InteractionCreate` events
+
+### Slash Commands
+- `/clear`, `/compact`, `/status` registered globally
+- Chat input command handling
+
+### Required Intents
+```javascript
+GatewayIntentBits.Guilds              // Server info
+GatewayIntentBits.GuildMessages       // Read messages
+GatewayIntentBits.MessageContent      // Access message text (privileged!)
+GatewayIntentBits.GuildMessageReactions // See reactions
+```
 
 ## Architecture
 
@@ -70,15 +160,15 @@ Discord Message
        ↓
   MessageHandler (should respond?)
        ↓
-  SessionManager (get/create session)
+  SessionManager (per-channel session lookup)
        ↓
   AIClient (Claude Agent SDK)
        ↓
-  PermissionHook ←→ Discord (approval)
+  PermissionHook ←→ Discord (buttons + reactions)
        ↓
-  ChunkedUpdater (streaming response)
+  ChunkedUpdater (streaming with smart editing)
        ↓
-  Discord Reply (with edits)
+  Discord Reply (live edits every 3s, then finalize)
 ```
 
 ## Files
