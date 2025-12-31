@@ -1,0 +1,31 @@
+{
+  "discordToken": "YOUR_BOT_TOKEN_HERE",
+  "guildId": "YOUR_GUILD_ID_HERE",
+  "monitorMentions": true,
+  "monitorAllMessages": false,
+  "allowedChannels": [],
+  "maxMessageLength": 2000,
+  "model": "sonnet",
+  "allowedTools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
+  "dangerousTools": ["Bash", "Write", "Edit"],
+  "updateIntervalMs": 3000,
+  "sessionPersistPath": "./data/sessions.json",
+  "permissionTimeoutMs": 60000,
+
+  "logLevel": "info",
+  "logTimestamps": true,
+  "logColors": true,
+
+  "attachments": {
+    "enabled": true,
+    "maxImageSize": 5242880,
+    "supportedImageTypes": ["image/jpeg", "image/png", "image/gif", "image/webp"]
+  },
+
+  "fileDownload": {
+    "enabled": true,
+    "autoDownload": true,
+    "maxFileSize": 8388608,
+    "allowedExtensions": [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log"]
+  }
+}
