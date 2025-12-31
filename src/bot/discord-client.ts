@@ -50,6 +50,9 @@ export class DiscordBot {
       // Initialize activity manager
       this.activityManager = new ActivityManager(this.client);
 
+      // Set initial status to idle
+      this.activityManager.setStatus('idle', true);
+
       // Initialize components that need the bot user ID
       this.permissionHook = new PermissionHook(
         this.config,
