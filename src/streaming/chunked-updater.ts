@@ -124,6 +124,9 @@ export class ChunkedUpdater {
     // Clear streaming indicator
     this.logger?.streamingComplete();
 
+    // Reset activity status to idle
+    this.activityManager?.reset();
+
     // Clear any pending timer
     if (this.updateTimer) {
       clearTimeout(this.updateTimer);
