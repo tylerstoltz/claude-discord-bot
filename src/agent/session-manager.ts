@@ -5,6 +5,9 @@ import type { PermissionHook } from "./permission-hook.js";
 import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
 import type { Logger } from "../logging/logger.js";
 import type { ProcessedImage } from "../types/attachment-types.js";
+import { unlink } from "fs/promises";
+import { join } from "path";
+import { homedir } from "os";
 
 export interface ManagedSession {
   channelId: string;
@@ -117,6 +120,12 @@ export class SessionManager {
 
   async clearSession(channelId: string): Promise<void> {
     const session = this.activeSessions.get(channelId);
+    const sessionId = session?.sdkSessionId;
+
+    // Delete SDK session file before clearing references
+    if (sessionId) {
+      await this.deleteSdkSessionFile(sessionId);
+    }
 
     if (session) {
       session.sdkSessionId = null;
@@ -128,6 +137,31 @@ export class SessionManager {
     await this.sessionStore.save();
 
     this.logger.info('💾 SESSION', `Cleared session for channel ${channelId.slice(-6)}`);
+  }
+
+  private async deleteSdkSessionFile(sessionId: string): Promise<void> {
+    try {
+      // Construct SDK session file path
+      // SDK stores sessions in ~/.claude/projects/{project-path}/{sessionId}.jsonl
+      // Project path is the cwd with slashes converted to dashes and leading slash removed
+      const projectPath = process.cwd().replace(/\//g, '-').substring(1);
+      const sessionFilePath = join(
+        homedir(),
+        '.claude',
+        'projects',
+        projectPath,
+        `${sessionId}.jsonl`
+      );
+
+      // Delete the file
+      await unlink(sessionFilePath);
+      this.logger.info('🗑️  DELETE', `Deleted SDK session file`, sessionId.slice(0, 8));
+    } catch (error) {
+      // Don't throw - file might not exist or already deleted
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.logger.warn('🗑️  DELETE', `Failed to delete session file`, (error as Error).message);
+      }
+    }
   }
 
   async compactSession(channelId: string): Promise<boolean> {
