@@ -10,6 +10,8 @@ A Discord bot that gives Claude Code full autonomous control of a machine, using
 - **Slash Commands**: `/compact` and `/clear` for session management
 - **Full Agent Control**: Claude can use all tools (Bash, Read, Write, Edit, etc.)
 - **Dual Interaction System**: Both modern buttons and classic reactions for maximum compatibility
+- **Image Support**: Send images to Claude for analysis (drag & drop in Discord)
+- **File Uploads**: Claude can upload files it creates OR arbitrary files you ask for to Discord
 
 ## Setup
 

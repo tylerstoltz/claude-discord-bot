@@ -83,19 +83,19 @@ npm init -y
   - Attachment settings (ready for Phase 2)
   - File download settings (ready for Phase 3)
 
-### 📋 Phase 2: Planned (Image Support)
-See `playground/PHASE_2_IMAGE_SUPPORT_SPEC.md` for detailed specification.
+### ✅ Phase 2: Complete (Image Support)
 - Download Discord image attachments
-- Convert to base64 format
+- Convert to base64 format with magic byte detection
 - Pass to Claude Agent SDK via content blocks
 - Support multiple images per message
-- Size and format validation
+- Robust format validation (PNG, JPEG, GIF, WebP)
 
-### 📋 Phase 3: Planned (File Download)
-- Auto-download files created by Write tool
-- Manual `/download` command
+### ✅ Phase 3: Complete (File Upload)
+- Auto-upload files created by Write tool
+- Manual upload via natural language ("upload that Biden pic")
+- Magic marker system: `[UPLOAD: /path/to/file.png]`
 - Size limits and extension filtering
-- Discord attachment integration
+- Support for images, videos, code, documents, etc.
 
 ## Key Architecture Patterns
 

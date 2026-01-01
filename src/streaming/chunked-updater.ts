@@ -207,6 +207,39 @@ export class ChunkedUpdater {
 
     // Upload tracked files after sending text
     await this.uploadFiles();
+
+    // Parse and upload any files mentioned in upload markers
+    await this.parseAndUploadMarkers(finalContent);
+  }
+
+  private async parseAndUploadMarkers(content: string): Promise<void> {
+    if (!this.fileUploadManager) {
+      return;
+    }
+
+    // Look for upload markers: [UPLOAD: /path/to/file.png]
+    const uploadMarkerRegex = /\[UPLOAD:\s*(.+?)\]/g;
+    const matches = [...content.matchAll(uploadMarkerRegex)];
+
+    if (matches.length === 0) {
+      return;
+    }
+
+    const filePaths = matches.map(m => m[1].trim());
+
+    try {
+      const uploadedCount = await this.fileUploadManager.uploadFiles(
+        this.channel,
+        filePaths,
+        '📎 **Here are your files:**'
+      );
+
+      if (uploadedCount > 0) {
+        this.logger?.info('📤 UPLOAD', `Uploaded ${uploadedCount} file(s) via markers`);
+      }
+    } catch (error) {
+      this.logger?.error('📤 UPLOAD', 'Failed to upload marked files', (error as Error).message);
+    }
   }
 
   private async uploadFiles(): Promise<void> {
@@ -222,6 +255,31 @@ export class ChunkedUpdater {
     } catch (error) {
       this.logger?.error('📤 UPLOAD', 'Failed to upload files', (error as Error).message);
     }
+  }
+
+  /**
+   * Manually upload specific files (exposed for Claude to use during conversation)
+   */
+  async uploadSpecificFiles(filePaths: string[], customMessage?: string): Promise<number> {
+    if (!this.fileUploadManager) {
+      return 0;
+    }
+
+    return await this.fileUploadManager.uploadFiles(this.channel, filePaths, customMessage);
+  }
+
+  /**
+   * Get the file upload manager (for access to upload methods)
+   */
+  getFileUploadManager(): typeof this.fileUploadManager {
+    return this.fileUploadManager;
+  }
+
+  /**
+   * Get the channel (for manual sends)
+   */
+  getChannel(): TextChannel {
+    return this.channel;
   }
 
   async sendError(errorMessage: string): Promise<void> {

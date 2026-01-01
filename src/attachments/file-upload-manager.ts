@@ -138,6 +138,64 @@ export class FileUploadManager {
   }
 
   /**
+   * Manually upload specific files by path (for user-requested uploads)
+   */
+  async uploadFiles(channel: TextChannel, filePaths: string[], customMessage?: string): Promise<number> {
+    if (!this.config.enabled) {
+      this.logger.warn('📤 UPLOAD', 'File upload is disabled in config');
+      return 0;
+    }
+
+    if (filePaths.length === 0) {
+      return 0;
+    }
+
+    const attachments: AttachmentBuilder[] = [];
+
+    for (const filePath of filePaths) {
+      const validation = await this.validateFile(filePath);
+
+      if (!validation.valid) {
+        this.logger.warn('📤 UPLOAD', `Skipping ${basename(filePath)}`, validation.reason || 'unknown');
+        continue;
+      }
+
+      try {
+        const fileBuffer = await readFile(filePath);
+        const fileName = basename(filePath);
+
+        const attachment = new AttachmentBuilder(fileBuffer, {
+          name: fileName
+        });
+
+        attachments.push(attachment);
+        this.logger.info('📤 UPLOAD', `Prepared ${fileName}`, `${fileBuffer.length} bytes`);
+      } catch (error) {
+        this.logger.error('📤 UPLOAD', `Failed to read ${basename(filePath)}`, (error as Error).message);
+      }
+    }
+
+    if (attachments.length === 0) {
+      this.logger.warn('📤 UPLOAD', 'No valid files to upload');
+      return 0;
+    }
+
+    // Upload to Discord
+    try {
+      await channel.send({
+        content: customMessage || '📎 **Files uploaded:**',
+        files: attachments
+      });
+
+      this.logger.info('📤 UPLOAD', `Uploaded ${attachments.length} file(s)`);
+      return attachments.length;
+    } catch (error) {
+      this.logger.error('📤 UPLOAD', 'Failed to upload files', (error as Error).message);
+      return 0;
+    }
+  }
+
+  /**
    * Clear all tracked files without uploading
    */
   clear(): void {

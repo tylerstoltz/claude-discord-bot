@@ -79,7 +79,7 @@ const defaultConfig: BotConfig = {
     enabled: true,
     autoUpload: true,
     maxFileSize: 25 * 1024 * 1024, // 25 MB (Discord free tier limit)
-    allowedExtensions: [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml"]
+    allowedExtensions: [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm"]
   }
 };
 
