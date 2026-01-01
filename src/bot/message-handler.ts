@@ -5,10 +5,12 @@ import { ChunkedUpdater } from "../streaming/chunked-updater.js";
 import type { Logger } from "../logging/logger.js";
 import type { ActivityManager } from "./activity-manager.js";
 import { ImageProcessor } from "../attachments/image-processor.js";
+import { FileUploadManager } from "../attachments/file-upload-manager.js";
 
 export class MessageHandler {
   private processingMessages = new Set<string>();
   private imageProcessor: ImageProcessor;
+  private fileUploadManager: FileUploadManager;
 
   constructor(
     private config: BotConfig,
@@ -19,6 +21,10 @@ export class MessageHandler {
   ) {
     this.imageProcessor = new ImageProcessor(
       config.attachments,
+      logger
+    );
+    this.fileUploadManager = new FileUploadManager(
+      config.fileUpload,
       logger
     );
   }
@@ -81,7 +87,8 @@ export class MessageHandler {
         this.config.updateIntervalMs,
         this.config.maxMessageLength,
         this.logger,
-        this.activityManager
+        this.activityManager,
+        this.fileUploadManager
       );
 
       try {

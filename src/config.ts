@@ -35,10 +35,10 @@ export interface BotConfig {
     supportedImageTypes: string[];
   };
 
-  // File download configuration
-  fileDownload: {
+  // File upload configuration (Claude -> Discord)
+  fileUpload: {
     enabled: boolean;
-    autoDownload: boolean;
+    autoUpload: boolean;
     maxFileSize: number;
     allowedExtensions: string[];
   };
@@ -74,12 +74,12 @@ const defaultConfig: BotConfig = {
     supportedImageTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"]
   },
 
-  // File download defaults
-  fileDownload: {
+  // File upload defaults (Claude -> Discord)
+  fileUpload: {
     enabled: true,
-    autoDownload: true,
-    maxFileSize: 8 * 1024 * 1024, // 8 MB (Discord free tier limit)
-    allowedExtensions: [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log"]
+    autoUpload: true,
+    maxFileSize: 25 * 1024 * 1024, // 25 MB (Discord free tier limit)
+    allowedExtensions: [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml"]
   }
 };
 

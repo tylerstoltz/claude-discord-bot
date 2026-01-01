@@ -2,6 +2,7 @@ import { Message, TextChannel } from "discord.js";
 import { splitMessage, formatStreamingMessage } from "./message-splitter.js";
 import type { Logger } from "../logging/logger.js";
 import type { ActivityManager } from "../bot/activity-manager.js";
+import type { FileUploadManager } from "../attachments/file-upload-manager.js";
 
 export class ChunkedUpdater {
   private currentMessage: Message | null = null;
@@ -19,7 +20,8 @@ export class ChunkedUpdater {
     private updateIntervalMs: number = 3000,
     private maxMessageLength: number = 2000,
     private logger?: Logger,
-    private activityManager?: ActivityManager
+    private activityManager?: ActivityManager,
+    private fileUploadManager?: FileUploadManager
   ) {}
 
   appendContent(content: string): void {
@@ -41,6 +43,18 @@ export class ChunkedUpdater {
 
     this.logger?.toolUse(toolName, inputPreview);
     this.activityManager?.setStatus('working');
+
+    // Track Write tool usage for file uploads
+    if (toolName === 'Write' && this.fileUploadManager) {
+      try {
+        const input = toolInput as { file_path?: string };
+        if (input.file_path) {
+          this.fileUploadManager.trackFile(input.file_path);
+        }
+      } catch (error) {
+        this.logger?.debug('📤 UPLOAD', 'Failed to track Write tool', (error as Error).message);
+      }
+    }
 
     this.contentBuffer += `\n\n> **Using:** \`${toolName}\`\n> ${inputPreview}\n\n`;
 
@@ -140,6 +154,8 @@ export class ChunkedUpdater {
 
     // Send final content
     if (!this.contentBuffer) {
+      // Upload files even if no text content
+      await this.uploadFiles();
       return;
     }
 
@@ -187,6 +203,24 @@ export class ChunkedUpdater {
           await this.sleep(500);
         }
       }
+    }
+
+    // Upload tracked files after sending text
+    await this.uploadFiles();
+  }
+
+  private async uploadFiles(): Promise<void> {
+    if (!this.fileUploadManager) {
+      return;
+    }
+
+    try {
+      const uploadedCount = await this.fileUploadManager.uploadTrackedFiles(this.channel);
+      if (uploadedCount > 0) {
+        this.logger?.info('📤 UPLOAD', `Uploaded ${uploadedCount} file(s) to Discord`);
+      }
+    } catch (error) {
+      this.logger?.error('📤 UPLOAD', 'Failed to upload files', (error as Error).message);
     }
   }
 

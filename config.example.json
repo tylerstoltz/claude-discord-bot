@@ -23,10 +23,10 @@
     "supportedImageTypes": ["image/jpeg", "image/png", "image/gif", "image/webp"]
   },
 
-  "fileDownload": {
+  "fileUpload": {
     "enabled": true,
-    "autoDownload": true,
-    "maxFileSize": 8388608,
-    "allowedExtensions": [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log"]
+    "autoUpload": true,
+    "maxFileSize": 26214400,
+    "allowedExtensions": [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml"]
   }
 }
