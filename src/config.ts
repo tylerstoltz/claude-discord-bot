@@ -9,6 +9,7 @@ export interface BotConfig {
   allowedChannels: string[];
   maxMessageLength: number;
   model: "sonnet" | "opus" | "haiku";
+  enableChrome: boolean;
   allowedTools: string[];
   dangerousTools: string[];
   updateIntervalMs: number;
@@ -50,6 +51,7 @@ const defaultConfig: BotConfig = {
   allowedChannels: [],
   maxMessageLength: 2000,
   model: "sonnet",
+  enableChrome: false,
   allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
   dangerousTools: ["Bash", "Write", "Edit", "MultiEdit"],
   updateIntervalMs: 3000,

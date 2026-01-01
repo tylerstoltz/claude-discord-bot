@@ -6,6 +6,7 @@
   "allowedChannels": [],
   "maxMessageLength": 2000,
   "model": "sonnet",
+  "enableChrome": false,
   "allowedTools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
   "dangerousTools": ["Bash", "Write", "Edit"],
   "updateIntervalMs": 3000,
