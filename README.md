@@ -51,9 +51,10 @@ A Discord bot that gives Claude Code full autonomous control of a machine, using
 
 ## Slash Commands
 
-- `/compact` - Summarize current context (keeps session)
+- `/compact` - Show conversation context info (message count, auto-compaction status)
 - `/clear` - Clear session and start fresh
 - `/status` - Show session info
+- `/rewind [count]` - Rewind conversation by removing recent messages (like ESC-ESC in CLI)
 
 ## Session Management
 
@@ -62,6 +63,7 @@ A Discord bot that gives Claude Code full autonomous control of a machine, using
 - Multiple users in the same channel share the same conversation context
 - Different channels are completely isolated from each other
 - Sessions persist to disk (`data/sessions.json`) and survive bot restarts
+- **Message history tracking** enables rewind functionality
 
 ### Session Lifecycle
 ```
@@ -69,7 +71,35 @@ First message in channel → Create new session → Get SDK session ID
 Subsequent messages     → Resume with existing session ID
 Bot restart             → Load persisted sessions from disk
 /clear command          → Wipe session for that channel
+/rewind [count]         → Rollback conversation by N message exchanges
 ```
+
+### Session Commands in Detail
+
+#### `/compact`
+Shows information about the current conversation context:
+- Message count in history
+- Explains SDK auto-compaction behavior
+- Suggests alternatives (`/clear` or `/rewind`)
+
+The Claude Agent SDK automatically compacts context when it grows large, so this command primarily provides visibility into the session state rather than triggering compaction.
+
+#### `/rewind [count]`
+Rewinds the conversation by removing recent message exchanges:
+- **Usage**: `/rewind` (removes last message) or `/rewind 5` (removes last 5 messages)
+- **Range**: 1-50 messages
+- **Behavior**:
+  - Removes specified number of message exchanges from history
+  - Updates session to earlier state
+  - If rewound to beginning, starts fresh conversation
+- **Similar to**: Pressing ESC twice in Claude Code CLI
+- **Use case**: Undo a mistake, try a different approach, or free up context
+
+#### `/clear`
+Complete session reset:
+- Deletes SDK session file from disk (`~/.claude/projects/...`)
+- Clears all message history
+- Next message starts a completely fresh conversation
 
 ## Chunked Streaming Response
 
@@ -142,8 +172,8 @@ The bot leverages these Discord.js capabilities:
 - Button interaction handling via `InteractionCreate` events
 
 ### Slash Commands
-- `/clear`, `/compact`, `/status` registered globally
-- Chat input command handling
+- `/clear`, `/compact`, `/status`, `/rewind` registered globally
+- Chat input command handling with parameter support
 
 ### Required Intents
 ```javascript
@@ -180,7 +210,7 @@ src/
 ├── bot/
 │   ├── discord-client.ts   # Discord.js client
 │   ├── message-handler.ts  # Message processing
-│   └── slash-commands.ts   # /compact, /clear, /status
+│   └── slash-commands.ts   # /compact, /clear, /status, /rewind
 ├── agent/
 │   ├── ai-client.ts        # Claude Agent SDK wrapper
 │   ├── session-manager.ts  # Session persistence

@@ -33,3 +33,10 @@ Thumbs.db
 
 # Test coverage
 coverage/
+
+# Runtime data
+data/
+
+# Playground (experiments, prototypes, specs - keep directory, ignore contents)
+playground/*
+!playground/.gitkeep

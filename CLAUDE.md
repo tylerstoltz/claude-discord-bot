@@ -201,7 +201,7 @@ See `config.example.json` for all available options.
 
 ### Branch Structure
 - `main` - Stable releases
-- `feature/*` - Feature development (current: `feature/activity-status-images-downloads`)
+- `feature/*` - Feature development (current: `feature/session-management`)
 
 ### Commit Message Format
 ```

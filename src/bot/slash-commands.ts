@@ -10,13 +10,24 @@ import type { Logger } from "../logging/logger.js";
 export const commands = [
   new SlashCommandBuilder()
     .setName("compact")
-    .setDescription("Summarize and compact the current conversation context"),
+    .setDescription("Show conversation context info (SDK auto-compacts when needed)"),
   new SlashCommandBuilder()
     .setName("clear")
     .setDescription("Clear the current session and start fresh"),
   new SlashCommandBuilder()
     .setName("status")
     .setDescription("Show the current session status"),
+  new SlashCommandBuilder()
+    .setName("rewind")
+    .setDescription("Rewind the conversation by removing recent messages")
+    .addIntegerOption((option) =>
+      option
+        .setName("count")
+        .setDescription("Number of message exchanges to remove (default: 1)")
+        .setRequired(false)
+        .setMinValue(1)
+        .setMaxValue(50)
+    ),
 ];
 
 export async function registerCommands(token: string, clientId: string, guildId?: string): Promise<void> {
@@ -55,6 +66,9 @@ export class SlashCommandHandler {
       case "status":
         await this.handleStatus(interaction, channelId);
         break;
+      case "rewind":
+        await this.handleRewind(interaction, channelId);
+        break;
       default:
         await interaction.reply({
           content: "Unknown command.",
@@ -69,19 +83,19 @@ export class SlashCommandHandler {
   ): Promise<void> {
     await interaction.deferReply();
 
-    const session = this.sessionManager.getActiveSession(channelId);
+    const result = await this.sessionManager.compactSession(channelId);
 
-    if (!session?.sdkSessionId) {
-      await interaction.editReply("No active session to compact.");
+    if (!result.success) {
+      await interaction.editReply("❌ No active session to show info for.");
       return;
     }
 
-    // The SDK handles compaction through the session
-    // For now, we'll inform the user - full compaction would require
-    // sending a special prompt or using SDK methods if available
     await interaction.editReply(
-      "Session context noted. The next message will continue with the current context. " +
-        "For a fresh start, use `/clear`."
+      `📊 **Session Context Info**\n\n` +
+      `• Messages in history: **${result.messageCount}**\n` +
+      `• The SDK automatically compacts context when it grows large\n` +
+      `• Use \`/clear\` for a fresh start, or \`/rewind\` to remove recent messages\n\n` +
+      `💡 Your next message will continue with the current context.`
     );
   }
 
@@ -115,5 +129,39 @@ export class SlashCommandHandler {
     ].join("\n");
 
     await interaction.reply({ content: status, ephemeral: true });
+  }
+
+  private async handleRewind(
+    interaction: ChatInputCommandInteraction,
+    channelId: string
+  ): Promise<void> {
+    await interaction.deferReply();
+
+    const count = interaction.options.getInteger("count") || 1;
+
+    const result = await this.sessionManager.rewindSession(channelId, count);
+
+    if (!result.success) {
+      await interaction.editReply("❌ No active session to rewind.");
+      return;
+    }
+
+    if (result.messagesRemoved === 0) {
+      await interaction.editReply("⚠️ No messages to rewind. The session is already at the beginning.");
+      return;
+    }
+
+    let message = `⏪ **Rewound conversation**\n\n`;
+    message += `• Removed **${result.messagesRemoved}** message${result.messagesRemoved > 1 ? 's' : ''} from history\n`;
+
+    if (result.rewoundTo) {
+      message += `• Conversation reset to session: \`${result.rewoundTo.slice(0, 8)}...\`\n`;
+      message += `\n💡 Your next message will continue from the earlier point in the conversation.`;
+    } else {
+      message += `• Session reset to the beginning\n`;
+      message += `\n💡 Your next message will start a fresh conversation.`;
+    }
+
+    await interaction.editReply(message);
   }
 }

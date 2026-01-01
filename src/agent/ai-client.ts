@@ -146,7 +146,8 @@ export class AIClient {
       yield {
         type: 'user' as const,
         message: userMessage,
-        parent_tool_use_id: null
+        parent_tool_use_id: null,
+        session_id: resumeSessionId || ''
       };
     };
 

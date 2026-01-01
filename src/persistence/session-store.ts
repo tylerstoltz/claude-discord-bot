@@ -4,6 +4,7 @@ import { dirname, resolve } from "path";
 export interface SessionData {
   sdkSessionId: string;
   lastActivity: string;
+  messageHistory?: string[]; // Stack of session IDs for rewind functionality
 }
 
 export interface SessionStore {
@@ -51,9 +52,11 @@ export class SessionPersistence {
   }
 
   setSessionId(channelId: string, sessionId: string): void {
+    const existing = this.data.channels[channelId];
     this.data.channels[channelId] = {
       sdkSessionId: sessionId,
       lastActivity: new Date().toISOString(),
+      messageHistory: existing?.messageHistory || [],
     };
   }
 
@@ -80,5 +83,40 @@ export class SessionPersistence {
         delete this.data.channels[channelId];
       }
     }
+  }
+
+  pushMessageHistory(channelId: string, sessionId: string): void {
+    if (!this.data.channels[channelId]) {
+      return;
+    }
+    const history = this.data.channels[channelId].messageHistory || [];
+    history.push(sessionId);
+    this.data.channels[channelId].messageHistory = history;
+  }
+
+  getMessageHistory(channelId: string): string[] {
+    return this.data.channels[channelId]?.messageHistory || [];
+  }
+
+  rewindMessageHistory(channelId: string, count: number): string | null {
+    if (!this.data.channels[channelId]) {
+      return null;
+    }
+
+    const history = this.data.channels[channelId].messageHistory || [];
+
+    // Remove 'count' entries from the end
+    for (let i = 0; i < count && history.length > 0; i++) {
+      history.pop();
+    }
+
+    this.data.channels[channelId].messageHistory = history;
+
+    // Return the new current session ID (last in history) or null
+    return history.length > 0 ? history[history.length - 1] : null;
+  }
+
+  getMessageCount(channelId: string): number {
+    return this.data.channels[channelId]?.messageHistory?.length || 0;
   }
 }

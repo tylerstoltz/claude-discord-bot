@@ -100,6 +100,8 @@ export class SessionManager {
           this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
           session.sdkSessionId = sessionId;
           this.sessionStore.setSessionId(channelId, sessionId);
+          // Track in message history for rewind
+          this.sessionStore.pushMessageHistory(channelId, sessionId);
           // Persist immediately
           this.sessionStore.save().catch((err) =>
             this.logger.error('💾 SESSION', 'Failed to persist', err.message)
@@ -112,6 +114,8 @@ export class SessionManager {
     if (newSessionId && newSessionId !== session.sdkSessionId) {
       session.sdkSessionId = newSessionId;
       this.sessionStore.setSessionId(channelId, newSessionId);
+      // Track in message history for rewind
+      this.sessionStore.pushMessageHistory(channelId, newSessionId);
       await this.sessionStore.save();
     }
 
@@ -164,17 +168,55 @@ export class SessionManager {
     }
   }
 
-  async compactSession(channelId: string): Promise<boolean> {
+  async compactSession(channelId: string): Promise<{ success: boolean; messageCount: number }> {
     const session = this.activeSessions.get(channelId);
 
     if (!session?.sdkSessionId) {
-      return false;
+      return { success: false, messageCount: 0 };
     }
 
-    // The SDK handles compaction internally
-    // We just need to continue using the same session
-    this.logger.info('💾 SESSION', `Compact requested for channel ${channelId.slice(-6)}`);
-    return true;
+    // Get current message count
+    const messageCount = this.sessionStore.getMessageCount(channelId);
+
+    // The SDK handles compaction automatically when context grows large
+    // This method just provides user feedback about the current session state
+    this.logger.info('💾 SESSION', `Compact info for channel ${channelId.slice(-6)}`, `${messageCount} messages`);
+
+    return { success: true, messageCount };
+  }
+
+  async rewindSession(channelId: string, count: number = 1): Promise<{ success: boolean; rewoundTo: string | null; messagesRemoved: number }> {
+    const session = this.activeSessions.get(channelId);
+
+    if (!session?.sdkSessionId) {
+      return { success: false, rewoundTo: null, messagesRemoved: 0 };
+    }
+
+    const beforeCount = this.sessionStore.getMessageCount(channelId);
+
+    // Rewind the message history
+    const newSessionId = this.sessionStore.rewindMessageHistory(channelId, count);
+
+    const afterCount = this.sessionStore.getMessageCount(channelId);
+    const messagesRemoved = beforeCount - afterCount;
+
+    if (newSessionId) {
+      // Update current session to the rewound state
+      session.sdkSessionId = newSessionId;
+      this.sessionStore.setSessionId(channelId, newSessionId);
+      await this.sessionStore.save();
+
+      this.logger.info('⏪ REWIND', `Rewound channel ${channelId.slice(-6)}`, `${messagesRemoved} messages removed`);
+      return { success: true, rewoundTo: newSessionId, messagesRemoved };
+    } else {
+      // Rewound to beginning - clear the session
+      session.sdkSessionId = null;
+      this.sessionStore.clearSession(channelId);
+      await this.sessionStore.save();
+
+      this.logger.info('⏪ REWIND', `Rewound channel ${channelId.slice(-6)} to start`, `${messagesRemoved} messages removed`);
+      return { success: true, rewoundTo: null, messagesRemoved };
+    }
   }
 
   async queryAndStreamWithImages(
@@ -200,6 +242,8 @@ export class SessionManager {
           this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
           session.sdkSessionId = sessionId;
           this.sessionStore.setSessionId(channelId, sessionId);
+          // Track in message history for rewind
+          this.sessionStore.pushMessageHistory(channelId, sessionId);
           this.sessionStore.save().catch((err) =>
             this.logger.error('💾 SESSION', 'Failed to persist', err.message)
           );
