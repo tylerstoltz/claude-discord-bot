@@ -35,6 +35,7 @@ export class AIClient {
       allowedTools: this.config.allowedTools,
       cwd: process.cwd(),
       executable: "/usr/bin/node",
+      extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
 
     // Resume session if we have a session ID
@@ -157,6 +158,7 @@ export class AIClient {
       allowedTools: this.config.allowedTools,
       cwd: process.cwd(),
       executable: "/usr/bin/node",
+      extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
 
     if (resumeSessionId) {
