@@ -4,9 +4,11 @@ import type { SessionManager } from "../agent/session-manager.js";
 import { ChunkedUpdater } from "../streaming/chunked-updater.js";
 import type { Logger } from "../logging/logger.js";
 import type { ActivityManager } from "./activity-manager.js";
+import { ImageProcessor } from "../attachments/image-processor.js";
 
 export class MessageHandler {
   private processingMessages = new Set<string>();
+  private imageProcessor: ImageProcessor;
 
   constructor(
     private config: BotConfig,
@@ -14,7 +16,12 @@ export class MessageHandler {
     private botUserId: string,
     private logger: Logger,
     private activityManager: ActivityManager
-  ) {}
+  ) {
+    this.imageProcessor = new ImageProcessor(
+      config.attachments,
+      logger
+    );
+  }
 
   async handleMessage(message: Message): Promise<void> {
     // Check if we should respond
@@ -55,6 +62,15 @@ export class MessageHandler {
       const startTime = Date.now();
       this.logger.channelActivity(message.channelId, 'RECEIVED', cleanedContent.slice(0, 100));
 
+      // Process image attachments
+      const images = await this.imageProcessor.processImages(
+        Array.from(message.attachments.values())
+      );
+
+      if (images.length > 0) {
+        this.logger.info('🖼️  IMAGES', `Processing ${images.length} image(s)`);
+      }
+
       // Update bot status
       this.activityManager.setStatus('thinking');
 
@@ -72,10 +88,11 @@ export class MessageHandler {
         // Start typing indicator
         await channel.sendTyping();
 
-        // Query Claude and stream response
-        await this.sessionManager.queryAndStream(
+        // Query Claude and stream response (with images if any)
+        await this.sessionManager.queryAndStreamWithImages(
           message.channelId,
           cleanedContent,
+          images,
           updater
         );
 

@@ -134,4 +134,83 @@ export class AIClient {
 
     return newSessionId;
   }
+
+  async queryWithMessage(
+    userMessage: any, // MessageParam from Anthropic SDK
+    updater: ChunkedUpdater,
+    resumeSessionId?: string,
+    callbacks?: QueryCallbacks
+  ): Promise<void> {
+    // Create async iterable that yields the SDK user message
+    const messageStream = async function* () {
+      yield {
+        type: 'user' as const,
+        message: userMessage,
+        parent_tool_use_id: null
+      };
+    };
+
+    const options: any = {
+      maxTurns: 100,
+      model: this.config.model,
+      allowedTools: this.config.allowedTools,
+      cwd: process.cwd(),
+      executable: "/usr/bin/node",
+    };
+
+    if (resumeSessionId) {
+      options.resume = resumeSessionId;
+    }
+
+    // Add permission hooks if configured
+    if (this.permissionHook && this.config.dangerousTools.length > 0) {
+      const matcher = this.config.dangerousTools.join("|");
+      options.hooks = {
+        PreToolUse: [
+          {
+            matcher,
+            hooks: [this.permissionHook.createHookHandler(this.channelId)],
+          },
+        ],
+      };
+    }
+
+    try {
+      const q = query({
+        prompt: messageStream(),
+        options
+      });
+
+      // Stream events
+      for await (const message of q) {
+        if (message.type === "system" && (message as any).subtype === "init") {
+          callbacks?.onSessionInit?.((message as any).session_id);
+        } else if (message.type === "assistant") {
+          const content = (message as any).message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === "text") {
+                updater.appendContent(block.text);
+                callbacks?.onText?.(block.text);
+              } else if (block.type === "tool_use") {
+                updater.onToolUse(block.name, block.input);
+                callbacks?.onToolUse?.(block.name, block.input);
+              }
+            }
+          } else if (typeof content === "string") {
+            updater.appendContent(content);
+            callbacks?.onText?.(content);
+          }
+        } else if (message.type === "result") {
+          callbacks?.onResult?.(
+            (message as any).subtype === "success",
+            (message as any).total_cost_usd
+          );
+        }
+      }
+    } catch (error) {
+      console.error("[AI] Query error:", error);
+      throw error;
+    }
+  }
 }
