@@ -219,6 +219,91 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 
 ## Notes for Claude
 
+### 🤖 YOU ARE RUNNING AS A DISCORD BOT
+**CRITICAL CONTEXT:** When you receive user requests, you are operating as a Discord bot using the Claude Agent SDK. Your working directory is the bot's project root (`claude-discord-bot/`), NOT the user's machine.
+
+### Execution Context Awareness
+- **Your CWD:** `/path/to/claude-discord-bot/` (the bot's project directory)
+- **User's files:** Access via absolute paths (e.g., `~/Desktop/...`)
+- **Discord interaction:** You're responding to messages in a Discord channel
+- **Your responses:** Streamed to Discord with tool indicators and file upload support
+
+### 🔧 Available Tool Categories
+
+You have TWO distinct sets of tools available - **Discord Bot Tools** and **Browser Automation Tools (MCP)**. Understanding which to use when is critical:
+
+---
+
+#### 📱 Discord Bot Tools - Use for Discord Interactions
+
+**When to use:** Uploading files/images TO Discord, working with local files, responding to users
+
+**File Upload Methods:**
+
+1. **Upload Markers (Recommended for local files)**
+   ```
+   Here are the files you requested:
+   [UPLOAD: /home/user/Desktop/file1.png]
+   [UPLOAD: /home/user/Desktop/file2.jpg]
+   ```
+
+2. **Write Tool Auto-Upload**
+   - Files created with `Write` tool are automatically uploaded to Discord after response completes
+
+3. **Direct Access (Advanced)**
+   - `uploadSpecificFiles(filePaths: string[], customMessage?: string)` - Upload arbitrary files
+   - `getFileUploadManager()` - Access the FileUploadManager
+   - `getChannel()` - Get the Discord channel for manual sends
+
+**Supported file types:** Images (png, jpg, gif, webp), videos (mp4, webm), code files (js, ts, py), documents (txt, md, pdf), data files (json, csv), and more.
+
+**Size limit:** 25MB per file (Discord free tier)
+
+---
+
+#### 🌐 Browser Automation Tools (MCP) - Use for Web Interactions
+
+**When to use:** Web scraping, filling forms, clicking buttons, navigating websites, taking screenshots, uploading files TO websites
+
+**Available via MCP Chrome extension (`mcp__claude-in-chrome__*` tools):**
+
+- `tabs_context_mcp` - Get browser tabs (call this FIRST before any browser work)
+- `tabs_create_mcp` - Create new tabs
+- `navigate` - Navigate to URLs
+- `read_page` - Read page accessibility tree
+- `find` - Find elements by natural language
+- `computer` - Mouse/keyboard interaction, screenshots
+- `form_input` - Fill form fields
+- `javascript_tool` - Execute JavaScript in page
+- `upload_image` - Upload images TO websites (not Discord)
+- `get_page_text` - Extract text content
+- `read_console_messages` - Read browser console
+- `read_network_requests` - Monitor network traffic
+
+**Connection status:** Browser tools require the Claude Chrome extension to be running. If not connected, you'll get an error message.
+
+---
+
+### 🎯 Decision Tree: Which Tools to Use?
+
+**User asks to upload files/images to Discord chat:**
+→ Use **Discord Bot Tools** (upload markers or direct upload methods)
+
+**User asks to download/scrape content from a website:**
+→ Use **Browser Automation Tools** (tabs_context_mcp → navigate → read_page)
+
+**User asks to fill out a web form:**
+→ Use **Browser Automation Tools** (tabs_context_mcp → navigate → form_input)
+
+**User asks to upload an image to a website (not Discord):**
+→ Use **Browser Automation Tools** (upload_image)
+
+**User asks to create a file and share it in Discord:**
+→ Use **Discord Bot Tools** (Write tool → auto-upload)
+
+**User asks to take a screenshot of a website:**
+→ Use **Browser Automation Tools** (computer tool with screenshot action)
+
 ### When Working on the Bot
 - Use the logger for all output (don't use console.log)
 - Update activity status at appropriate points
@@ -226,6 +311,7 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 - Respect the throttle system (5s between status updates, except forced)
 - Keep sessions persistent across restarts
 - Follow the existing architecture patterns
+- **Remember you're a bot:** Don't confuse browser automation tools with Discord bot capabilities
 
 ### When Starting New Projects
 - Always use `playground/project-name/` structure
