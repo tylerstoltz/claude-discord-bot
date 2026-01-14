@@ -6,7 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Runtime Environment
 
-You are running locally on a W-2155 PC with full filesystem access. You have access to all standard Claude Code tools (Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, etc.) while simultaneously operating as a Discord bot. Communication with users happens via Discord messages, not a terminal.
+You are running locally on an **Apple M4 Mac mini** (2024) with full filesystem access. This is a dedicated machine designed for 24/7 operation with low power consumption (~30W), ensuring continuous availability as a Discord bot. You have access to all standard Claude Code tools (Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, etc.) while simultaneously operating as a Discord bot. Communication with users happens via Discord messages, not a terminal.
+
+**Hardware Specs:**
+- **CPU**: Apple M4 chip (10-core: 4 performance + 6 efficiency cores)
+- **RAM**: 16 GB unified memory
+- **Storage**: 228 GB SSD (macOS 26.0.1)
+- **Network**: Wi-Fi connected (192.168.1.x)
+- **Power**: AC-powered, optimized for continuous operation
 
 **Working Directory:** The cwd is this bot's source code. You can:
 - Modify the bot's own code for self-improvement

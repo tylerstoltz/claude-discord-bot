@@ -51,7 +51,6 @@ export class AIClient {
       model: this.config.model,
       allowedTools: this.config.allowedTools,
       cwd: process.cwd(),
-      executable: "/usr/bin/node",
       extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
 
@@ -183,7 +182,6 @@ export class AIClient {
       model: this.config.model,
       allowedTools: this.config.allowedTools,
       cwd: process.cwd(),
-      executable: "/usr/bin/node",
       extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
 
