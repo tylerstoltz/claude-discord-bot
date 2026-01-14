@@ -1,340 +1,90 @@
-# Claude Code Project Instructions
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+**Note:** This file is automatically injected into the Claude subprocess via `systemPrompt.append` in `ai-client.ts`. Any context added here will be available to Claude when responding to Discord messages.
+
+## Runtime Environment
+
+You are running locally on a W-2155 PC with full filesystem access. You have access to all standard Claude Code tools (Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, etc.) while simultaneously operating as a Discord bot. Communication with users happens via Discord messages, not a terminal.
+
+**Working Directory:** The cwd is this bot's source code. You can:
+- Modify the bot's own code for self-improvement
+- Add new tools and capabilities to the bot
+- Read and explore the local filesystem
+
+**File Creation Policy:** Any new projects, tasks, or multi-file work should go in the `playground/` subdirectory. Each project or task should get its own subfolder (e.g., `playground/web-scraper/`, `playground/data-analysis/`). Do NOT create files in the bot's source directories unless modifying the bot itself.
 
 ## Project Overview
-This is a Discord bot that integrates Claude AI via the Claude Agent SDK. The bot allows users to interact with Claude directly through Discord, with features like session management, streaming responses, permission controls, and activity status indicators.
+
+Discord bot that integrates Claude AI via the Claude Agent SDK. Users interact with Claude through Discord with session management, streaming responses, permission controls, and activity status.
+
+## Requirements
+
+- Node.js 18+
+- Claude Code authenticated (`claude login`)
+- Discord bot with MESSAGE_CONTENT intent enabled
+
+## Commands
+
+```bash
+npm run dev      # Development mode with auto-reload (tsx watch)
+npm start        # Production mode
+npm run build    # TypeScript compilation
+```
+
+## Architecture
+
+```
+Discord Message → MessageHandler → SessionManager → AIClient → ChunkedUpdater → Discord Reply
+                                                       ↓
+                                              PermissionHook ←→ Discord (buttons + reactions)
+```
+
+### Key Data Flows
+
+1. **Session Management**: Per-channel sessions stored in `data/sessions.json`. Each channel has independent conversation context that persists across restarts. Uses Claude Agent SDK's session resumption via session IDs.
+
+2. **Streaming**: `ChunkedUpdater` batches Claude's output and edits Discord messages every 3 seconds. Handles rate limits with exponential backoff. Messages >2000 chars are split via `message-splitter.ts`.
+
+3. **Permission System**: `permission-hook.ts` intercepts dangerous tool calls, sends Discord embed with buttons + emoji reactions, waits for user approval with configurable timeout.
+
+4. **Activity Status**: `activity-manager.ts` updates Discord presence (Idle/Thinking/Working/Writing) with 5-second throttling except for forced updates.
+
+5. **Image Input**: `image-processor.ts` downloads Discord attachments, validates via magic bytes, converts to base64 for Claude Agent SDK content blocks.
+
+6. **File Upload**: `file-upload-manager.ts` handles auto-upload of files created by Write tool and manual uploads via `[UPLOAD: /path/to/file]` markers.
+
+### Core Files
+
+| File | Purpose |
+|------|---------|
+| `src/bot/discord-client.ts` | Discord.js client setup and event handlers |
+| `src/bot/message-handler.ts` | Message routing and response orchestration |
+| `src/agent/ai-client.ts` | Claude Agent SDK wrapper using V1 `query()` API |
+| `src/agent/session-manager.ts` | Session lifecycle and persistence |
+| `src/agent/permission-hook.ts` | Tool approval via Discord UI (PreToolUse hook) |
+| `src/streaming/chunked-updater.ts` | Streaming response handler |
+| `src/logging/logger.ts` | Configurable logging (use this, not console.log) |
+
+## Configuration
+
+Copy `config.example.json` to `config.json`. Key settings:
+- `discordToken`: Bot token (required)
+- `guildId`: For faster slash command registration
+- `dangerousTools`: Tools requiring Discord approval
+- `logLevel`: debug/info/warn/error
+- `enableChrome`: Enable browser tool for Claude
 
 ## Development Guidelines
 
-### Working on This Bot
-When adding features to **this Discord bot project**, work directly in the main source directories:
-- `src/` - Source code for the bot
-- `config.json` - Bot configuration
-- `package.json` - Dependencies
-
-**Example tasks for the bot:**
-- Adding new slash commands
-- Implementing image support
-- Adding file download features
-- Improving logging or status indicators
-- Modifying session management
-
-### Working on Unrelated Projects
-For **any new development tasks unrelated to this Discord bot**, use the `playground/` directory:
-
-```
-playground/
-├── project-name-1/     # Each project gets its own folder
-│   ├── src/
-│   ├── package.json
-│   └── README.md
-├── project-name-2/
-│   ├── ...
-└── project-name-3/
-    └── ...
-```
-
-**Why?**
-- Keeps the bot project clean and focused
-- Prevents mixing dependencies
-- Allows independent development and testing
-- Easy to manage multiple experiments
-
-**Example unrelated projects:**
-- Web scrapers
-- API integrations
-- Data analysis scripts
-- Test applications
-- Prototypes and experiments
-
-### Playground Structure
-The `playground/` directory is already set up for this purpose:
-- **`claude-monitor/`** - A monitoring tool for Claude Code sessions (cloned repo)
-- **Specification documents** - Design specs for upcoming features
-  - `IMPLEMENTATION_PLAN.md` - Original comprehensive plan
-  - `IMPLEMENTATION_PLAN_FINAL.md` - Refined plan based on requirements
-  - `PHASE_2_IMAGE_SUPPORT_SPEC.md` - Detailed spec for image support
-
-**For new projects:**
-```bash
-# Create a new project in playground
-mkdir playground/my-new-project
-cd playground/my-new-project
-npm init -y
-```
-
-## Current Feature Status
-
-### ✅ Phase 1: Complete
-- **Discord Presence Status** - Bot shows real-time activity
-  - 💤 Idle - Ready for messages
-  - 🤔 Thinking... - Processing request
-  - ⚙️ Working... - Executing tools
-  - ✍️ Writing... - Streaming response
-
-- **Enhanced Terminal Logging** - Configurable, colored logs
-  - Log levels: debug, info, warn, error
-  - Emoji prefixes for easy scanning
-  - Timestamps (ISO format)
-  - Streaming progress indicators
-
-- **Configuration System** - Extended config.json
-  - Logging settings (level, colors, timestamps)
-  - Guild-specific slash commands
-  - Attachment settings (ready for Phase 2)
-  - File download settings (ready for Phase 3)
-
-### ✅ Phase 2: Complete (Image Support)
-- Download Discord image attachments
-- Convert to base64 format with magic byte detection
-- Pass to Claude Agent SDK via content blocks
-- Support multiple images per message
-- Robust format validation (PNG, JPEG, GIF, WebP)
-
-### ✅ Phase 3: Complete (File Upload)
-- Auto-upload files created by Write tool
-- Manual upload via natural language ("upload that Biden pic")
-- Magic marker system: `[UPLOAD: /path/to/file.png]`
-- Size limits and extension filtering
-- Support for images, videos, code, documents, etc.
-
-## Key Architecture Patterns
-
-### Session Management
-- **Per-channel sessions** - Each Discord channel has its own conversation context
-- **Persistent storage** - Sessions saved to `data/sessions.json`
-- **SDK integration** - Uses Claude Agent SDK's session resumption
-
-### Streaming Responses
-- **Chunked updates** - Messages edited every 3 seconds during streaming
-- **Rate limit handling** - Exponential backoff on Discord API limits
-- **Tool indicators** - Shows when tools are being used
-
-### Permission System
-- **Dual approval** - Interactive buttons + emoji reactions (fallback)
-- **Dangerous tools** - Configurable list requiring approval
-- **Timeout handling** - Auto-deny after configured timeout
-
-### Activity Status
-- **Global presence** - Shows bot's current state to all users
-- **Force updates** - Important transitions bypass throttling
-- **Lifecycle tracking** - Updates throughout request processing
-
-## Important Files
-
-### Configuration
-- `config.json` - Main configuration file (not in repo)
-- `config.example.json` - Example configuration with all fields
-- `src/config.ts` - Configuration type definitions and defaults
-
-### Core Components
-- `src/bot/discord-client.ts` - Main Discord.js client and event handlers
-- `src/bot/message-handler.ts` - Message processing and routing
-- `src/bot/activity-manager.ts` - Discord presence status management
-- `src/agent/session-manager.ts` - Session lifecycle management
-- `src/agent/ai-client.ts` - Claude Agent SDK integration
-- `src/streaming/chunked-updater.ts` - Streaming response handler
-- `src/logging/logger.ts` - Configurable logging system
-
-### Slash Commands
-- `src/bot/slash-commands.ts` - Command definitions and handlers
-- Commands: `/status`, `/clear`, `/compact`
-
-### Permission System
-- `src/agent/permission-hook.ts` - Tool permission approval system
-
-## Development Workflow
-
-### Adding Features to the Bot
-1. Create new files in appropriate `src/` subdirectories
-2. Update `src/config.ts` if new configuration needed
-3. Integrate with existing components (logger, activity manager, etc.)
-4. Test with the running bot
-5. Commit with descriptive messages
-6. Update this CLAUDE.md if architecture changes
-
-### Working on Unrelated Projects
-1. Create new directory in `playground/`
-2. Initialize as independent project
-3. Work freely without affecting the bot
-4. Document in project's own README
-
-## Testing
-
-### Bot Testing Checklist
-- [ ] Log levels work (debug, info, warn, error)
-- [ ] Status transitions are correct
-- [ ] Slash commands respond properly
-- [ ] Sessions persist across restarts
-- [ ] Permission system works
-- [ ] Error handling doesn't crash bot
-
-### Running the Bot
-```bash
-npm install
-npm run dev  # Development mode with auto-reload
-npm start    # Production mode
-```
-
-## Dependencies
-
-### Current
-- `discord.js` - Discord API client
-- `@anthropic-ai/claude-agent-sdk` - Claude integration
-- `chalk` - Terminal colors
-- `dotenv` - Environment variables (optional)
-
-### For Future Phases
-- Phase 2 (Images): No new dependencies (uses built-in fetch, Buffer)
-- Phase 3 (Files): Possibly `pdf-parse` for PDF support
-
-## Environment Setup
-
-### Required
-- Node.js 18+ (for built-in fetch)
-- Discord bot token (in `config.json`)
-- Valid `guildId` for faster command registration (optional)
-
-### Configuration
-See `config.example.json` for all available options.
-
-## Git Workflow
-
-### Branch Structure
-- `main` - Stable releases
-- `feature/*` - Feature development (current: `feature/session-management`)
-
-### Commit Message Format
-```
-type: Brief description
-
-Detailed explanation if needed.
-Bullet points for multiple changes.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
-```
-
-**Types:** feat, fix, docs, refactor, test, chore
-
-## Notes for Claude
-
-### 🤖 YOU ARE RUNNING AS A DISCORD BOT
-**CRITICAL CONTEXT:** When you receive user requests, you are operating as a Discord bot using the Claude Agent SDK. Your working directory is the bot's project root (`claude-discord-bot/`), NOT the user's machine.
-
-### Execution Context Awareness
-- **Your CWD:** `/path/to/claude-discord-bot/` (the bot's project directory)
-- **User's files:** Access via absolute paths (e.g., `~/Desktop/...`)
-- **Discord interaction:** You're responding to messages in a Discord channel
-- **Your responses:** Streamed to Discord with tool indicators and file upload support
-
-### 🔧 Available Tool Categories
-
-You have TWO distinct sets of tools available - **Discord Bot Tools** and **Browser Automation Tools (MCP)**. Understanding which to use when is critical:
-
----
-
-#### 📱 Discord Bot Tools - Use for Discord Interactions
-
-**When to use:** Uploading files/images TO Discord, working with local files, responding to users
-
-**File Upload Methods:**
-
-1. **Upload Markers (Recommended for local files)**
-   ```
-   Here are the files you requested:
-   [UPLOAD: /home/user/Desktop/file1.png]
-   [UPLOAD: /home/user/Desktop/file2.jpg]
-   ```
-
-2. **Write Tool Auto-Upload**
-   - Files created with `Write` tool are automatically uploaded to Discord after response completes
-
-3. **Direct Access (Advanced)**
-   - `uploadSpecificFiles(filePaths: string[], customMessage?: string)` - Upload arbitrary files
-   - `getFileUploadManager()` - Access the FileUploadManager
-   - `getChannel()` - Get the Discord channel for manual sends
-
-**Supported file types:** Images (png, jpg, gif, webp), videos (mp4, webm), code files (js, ts, py), documents (txt, md, pdf), data files (json, csv), and more.
-
-**Size limit:** 25MB per file (Discord free tier)
-
----
-
-#### 🌐 Browser Automation Tools (MCP) - Use for Web Interactions
-
-**When to use:** Web scraping, filling forms, clicking buttons, navigating websites, taking screenshots, uploading files TO websites
-
-**Available via MCP Chrome extension (`mcp__claude-in-chrome__*` tools):**
-
-- `tabs_context_mcp` - Get browser tabs (call this FIRST before any browser work)
-- `tabs_create_mcp` - Create new tabs
-- `navigate` - Navigate to URLs
-- `read_page` - Read page accessibility tree
-- `find` - Find elements by natural language
-- `computer` - Mouse/keyboard interaction, screenshots
-- `form_input` - Fill form fields
-- `javascript_tool` - Execute JavaScript in page
-- `upload_image` - Upload images TO websites (not Discord)
-- `get_page_text` - Extract text content
-- `read_console_messages` - Read browser console
-- `read_network_requests` - Monitor network traffic
-
-**Connection status:** Browser tools require the Claude Chrome extension to be running. If not connected, you'll get an error message.
-
----
-
-### 🎯 Decision Tree: Which Tools to Use?
-
-**User asks to upload files/images to Discord chat:**
-→ Use **Discord Bot Tools** (upload markers or direct upload methods)
-
-**User asks to download/scrape content from a website:**
-→ Use **Browser Automation Tools** (tabs_context_mcp → navigate → read_page)
-
-**User asks to fill out a web form:**
-→ Use **Browser Automation Tools** (tabs_context_mcp → navigate → form_input)
-
-**User asks to upload an image to a website (not Discord):**
-→ Use **Browser Automation Tools** (upload_image)
-
-**User asks to create a file and share it in Discord:**
-→ Use **Discord Bot Tools** (Write tool → auto-upload)
-
-**User asks to take a screenshot of a website:**
-→ Use **Browser Automation Tools** (computer tool with screenshot action)
-
-### When Working on the Bot
-- Use the logger for all output (don't use console.log)
-- Update activity status at appropriate points
-- Handle errors gracefully (don't crash the bot)
-- Respect the throttle system (5s between status updates, except forced)
-- Keep sessions persistent across restarts
-- Follow the existing architecture patterns
-- **Remember you're a bot:** Don't confuse browser automation tools with Discord bot capabilities
-
-### When Starting New Projects
-- Always use `playground/project-name/` structure
-- Create independent package.json
-- Don't modify the bot's dependencies
-- Document the project's purpose in its own README
-
-### File Organization Rules
-**Bot files:** `src/`, `config.json`, root-level configs
-**Experiments/prototypes:** `playground/project-name/`
-**Specifications:** `playground/*.md`
-**Temporary work:** `playground/` (with clear project folders)
-
-## Support and Resources
-
-- Discord.js Docs: https://discord.js.org/
-- Claude Agent SDK: https://github.com/anthropics/claude-agent-sdk
-- Claude API Docs: https://docs.anthropic.com/
-
-## Metadata
-
-**Project Type:** Discord Bot + Claude AI Integration
-**Language:** TypeScript
-**Runtime:** Node.js 18+
-**Primary Purpose:** Enable Discord users to interact with Claude AI
-**Development Mode:** Active - Phase 1 complete, Phase 2 planned
+- Use the logger (`src/logging/logger.ts`) for all output, not console.log
+- Update activity status at appropriate lifecycle points
+- Sessions must persist across restarts
+
+## Slash Commands
+
+- `/status` - Session info
+- `/clear` - Reset session
+- `/compact` - Context info
+- `/rewind [count]` - Rollback conversation history

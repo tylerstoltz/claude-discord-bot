@@ -1,4 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
 import type { BotConfig } from "../config.js";
 import type { PermissionHook } from "./permission-hook.js";
 import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
@@ -9,6 +11,21 @@ export interface QueryCallbacks {
   onText?: (text: string) => void;
   onResult?: (success: boolean, cost?: number) => void;
 }
+
+// Load CLAUDE.md content at startup to provide context to Claude subprocess
+function loadClaudeMdContext(): string | undefined {
+  const claudeMdPath = join(process.cwd(), "CLAUDE.md");
+  if (existsSync(claudeMdPath)) {
+    try {
+      return readFileSync(claudeMdPath, "utf-8");
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+const CLAUDE_MD_CONTEXT = loadClaudeMdContext();
 
 export class AIClient {
   constructor(
@@ -37,6 +54,15 @@ export class AIClient {
       executable: "/usr/bin/node",
       extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
+
+    // Inject CLAUDE.md context so Claude subprocess has project awareness
+    if (CLAUDE_MD_CONTEXT) {
+      options.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: CLAUDE_MD_CONTEXT
+      };
+    }
 
     // Resume session if we have a session ID
     if (resumeSessionId) {
@@ -160,6 +186,15 @@ export class AIClient {
       executable: "/usr/bin/node",
       extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
+
+    // Inject CLAUDE.md context so Claude subprocess has project awareness
+    if (CLAUDE_MD_CONTEXT) {
+      options.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: CLAUDE_MD_CONTEXT
+      };
+    }
 
     if (resumeSessionId) {
       options.resume = resumeSessionId;
