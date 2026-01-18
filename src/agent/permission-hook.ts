@@ -32,22 +32,38 @@ export class PermissionHook {
     return async (
       input: { tool_name: string; tool_input: unknown },
       toolUseId?: string
-    ): Promise<{ continue?: boolean; decision?: string; stopReason?: string }> => {
+    ): Promise<{
+      continue?: boolean;
+      hookSpecificOutput?: {
+        hookEventName: 'PreToolUse';
+        permissionDecision?: 'allow' | 'deny';
+        permissionDecisionReason?: string;
+      };
+    }> => {
       const toolName = input.tool_name;
       const toolInput = input.tool_input;
 
       // Check if this is a dangerous tool
       if (!this.config.dangerousTools.includes(toolName)) {
-        return { continue: true };
+        return {
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow'
+          }
+        };
       }
 
       const channel = this.getChannel(channelId);
       if (!channel) {
         this.logger.error('🔒 PERMISSION', `Channel ${channelId.slice(-6)} not found`);
         return {
-          decision: "block",
-          stopReason: "Cannot request permission: channel not found",
           continue: false,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'Cannot request permission: channel not found'
+          }
         };
       }
 
@@ -59,13 +75,22 @@ export class PermissionHook {
 
       if (approved) {
         this.logger.info('🔒 PERMISSION', `Approved: ${toolName}`);
-        return { decision: "approve", continue: true };
+        return {
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow'
+          }
+        };
       } else {
         this.logger.warn('🔒 PERMISSION', `Denied: ${toolName}`);
         return {
-          decision: "block",
-          stopReason: "User denied permission for this operation",
           continue: false,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'User denied permission for this operation'
+          }
         };
       }
     };
