@@ -73,6 +73,8 @@ export class PermissionHook {
 
       const approved = await this.requestApproval(channel, toolName, toolInput, id);
 
+      this.logger.info('🔒 PERMISSION', `Approval result for ${toolName}: ${approved}`, `ID: ${id.slice(0, 8)}`);
+
       if (approved) {
         this.logger.info('🔒 PERMISSION', `Approved: ${toolName}`);
         return {

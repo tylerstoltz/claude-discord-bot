@@ -78,7 +78,7 @@ export class AIClient {
             hooks: [
               this.permissionHook.createHookHandler(this.channelId),
             ],
-            // SDK timeout in seconds (must be longer than our Discord timeout)
+            // SDK timeout in seconds (must be LONGER than Discord timeout so hook can respond)
             timeout: Math.ceil(this.config.permissionTimeoutMs / 1000) + 5,
           },
         ],
