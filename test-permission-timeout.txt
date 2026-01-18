@@ -1,0 +1,9 @@
+Testing permission timeout fix - 2nd attempt
+
+If this file gets created/updated even though the permission timed out,
+then the bug is STILL present and the SDK is ignoring our hook response.
+
+If this file does NOT get created, then the fix worked! The permission
+hook correctly blocked the tool execution on timeout.
+
+Timestamp: 2026-01-18 14:20
