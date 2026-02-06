@@ -1,0 +1,26 @@
+Timeout Verification Test - Post-Fix
+=====================================
+
+Timestamp: 2026-01-18 18:30 (approximate)
+
+This file is being written to test if the permission timeout fix works correctly.
+
+Expected behavior after the fix:
+- Permission request should appear in Discord
+- If user lets it time out (60 seconds), the tool should be DENIED
+- This file should NOT be created
+
+If this file exists with a recent timestamp, the bug is still present.
+If this file does NOT exist, the fix worked! ✅
+
+Changes applied:
+- Added SDK hook timeout (65s) to queryWithMessage method in ai-client.ts
+- This ensures Discord's 60s timeout fires first and properly denies tool execution
+- Previously only queryWithUpdater had the timeout, but all Discord messages use queryWithMessage
+
+Test procedure:
+1. Request this Write operation from Discord
+2. Wait for permission prompt
+3. Do NOT click Approve or Deny
+4. Let it time out naturally after 60 seconds
+5. Check if this file was created

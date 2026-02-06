@@ -1,0 +1,14 @@
+Timeout Test - Tracking exact timestamps
+
+Request timestamp: 2026-01-18 (check Discord for exact time)
+
+If this file exists with a timestamp AFTER the 60-second timeout,
+then the tool execution happened despite the timeout denial.
+
+This will help us understand the exact timing of:
+1. When the permission request is sent
+2. When the 60-second timeout fires
+3. When the actual Write tool executes (if at all)
+
+Expected behavior: This file should NOT be created if timeout properly denies.
+Actual behavior: Let's see what happens...

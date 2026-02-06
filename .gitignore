@@ -40,3 +40,6 @@ data/
 # Playground (experiments, prototypes, specs - keep directory, ignore contents)
 playground/*
 !playground/.gitkeep
+
+# Secrets
+secrets/
