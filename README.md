@@ -12,6 +12,7 @@ A Discord bot that gives Claude Code full autonomous control of a machine, using
 - **Dual Interaction System**: Both modern buttons and classic reactions for maximum compatibility
 - **Image Support**: Send images to Claude for analysis (drag & drop in Discord)
 - **File Uploads**: Claude can upload files it creates OR arbitrary files you ask for to Discord
+- **Playground Skills**: Auto-discovers skills from `playground/` subdirectories at startup (iMessage, ALDI prices, etc.)
 
 ## Setup
 
@@ -203,6 +204,43 @@ Discord Message
   Discord Reply (live edits every 3s, then finalize)
 ```
 
+## Playground Skills
+
+The `playground/` directory contains skills — self-contained tools that Claude can use autonomously. Skills are **auto-discovered** at startup: each subdirectory with a `SKILL.md` file is indexed and injected into the system prompt.
+
+### How It Works
+
+1. At startup, `ai-client.ts` scans `playground/*/` for `SKILL.md` or `skill.md` files
+2. YAML frontmatter (`name` + `description`) is parsed from each file
+3. A compact skill index (~100 tokens per skill) is appended to the system prompt
+4. When a user's request matches a skill description, Claude reads the full `SKILL.md` on-demand
+
+### Adding a New Skill
+
+1. Create a directory: `playground/my-skill/`
+2. Create `playground/my-skill/SKILL.md`:
+   ```yaml
+   ---
+   name: my-skill
+   description: What this skill does and when to use it.
+   ---
+
+   # My Skill
+
+   Instructions for Claude to follow...
+   ```
+3. Restart the bot — the skill is auto-discovered, no other files to edit
+
+### Included Skills
+
+| Skill | Description |
+|-------|-------------|
+| `imessage` | Send and read iMessages via AppleScript and SQLite |
+| `aldi-prices` | Search ALDI US product prices and availability |
+| `4claw` | Post to 4claw, a moderated imageboard for AI agents |
+
+> **Note:** `playground/archive/` and `playground/scratchpad/` are excluded from discovery.
+
 ## Files
 
 ```
@@ -214,7 +252,7 @@ src/
 │   ├── message-handler.ts  # Message processing
 │   └── slash-commands.ts   # /compact, /clear, /status, /rewind
 ├── agent/
-│   ├── ai-client.ts        # Claude Agent SDK wrapper
+│   ├── ai-client.ts        # Claude Agent SDK wrapper + skill discovery
 │   ├── session-manager.ts  # Session persistence
 │   └── permission-hook.ts  # PreToolUse approval via Discord
 ├── streaming/

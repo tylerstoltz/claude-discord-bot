@@ -1,5 +1,5 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 import type { BotConfig } from "../config.js";
 import type { PermissionHook } from "./permission-hook.js";
@@ -25,7 +25,116 @@ function loadClaudeMdContext(): string | undefined {
   return undefined;
 }
 
+// --- Playground Skill Discovery ---
+
+interface PlaygroundSkill {
+  name: string;
+  description: string;
+  path: string; // relative path to SKILL.md from cwd
+}
+
+/** Parse YAML frontmatter from a SKILL.md file. Handles flat key-value pairs only. */
+function parseFrontmatter(content: string): Record<string, string> | null {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return null;
+  const result: Record<string, string> = {};
+  for (const line of match[1].split("\n")) {
+    const kv = line.match(/^(\w[\w-]*)\s*:\s*(.+)$/);
+    if (kv) {
+      result[kv[1]] = kv[2].replace(/^["']|["']$/g, "").trim();
+    }
+  }
+  return result;
+}
+
+/** Scan playground/ for SKILL.md files and build a compact skill index. */
+function loadPlaygroundSkillIndex(): string | undefined {
+  const playgroundDir = join(process.cwd(), "playground");
+  if (!existsSync(playgroundDir)) return undefined;
+
+  const SKIP_DIRS = new Set(["archive", "scratchpad"]);
+  const SKILL_FILENAMES = ["SKILL.md", "skill.md"];
+
+  const skills: PlaygroundSkill[] = [];
+
+  let entries: string[];
+  try {
+    entries = readdirSync(playgroundDir);
+  } catch {
+    return undefined;
+  }
+
+  for (const entry of entries) {
+    if (SKIP_DIRS.has(entry)) continue;
+    const dirPath = join(playgroundDir, entry);
+
+    // Find skill file
+    let skillFile: string | null = null;
+    for (const filename of SKILL_FILENAMES) {
+      const candidate = join(dirPath, filename);
+      if (existsSync(candidate)) {
+        skillFile = candidate;
+        break;
+      }
+    }
+    if (!skillFile) continue;
+
+    let content: string;
+    try {
+      content = readFileSync(skillFile, "utf-8");
+    } catch {
+      continue;
+    }
+
+    const relativePath = `playground/${entry}/${skillFile.split("/").pop()}`;
+
+    // Try frontmatter first
+    const fm = parseFrontmatter(content);
+    if (fm?.name && fm?.description) {
+      skills.push({ name: fm.name, description: fm.description, path: relativePath });
+      continue;
+    }
+
+    // Fallback: first # heading as name, directory name as description
+    const headingMatch = content.match(/^#\s+(.+)$/m);
+    if (headingMatch) {
+      skills.push({
+        name: entry.toLowerCase(),
+        description: headingMatch[1].trim(),
+        path: relativePath,
+      });
+    }
+  }
+
+  if (skills.length === 0) return undefined;
+
+  const rows = skills
+    .map((s) => `| ${s.name} | ${s.path} | ${s.description} |`)
+    .join("\n");
+
+  return [
+    "## Available Playground Skills",
+    "",
+    "IMPORTANT: Before performing ANY task related to a skill below, you MUST first",
+    "read its SKILL.md for full instructions using the Read tool. Do NOT implement",
+    "these capabilities from scratch — tested scripts and workflows already exist.",
+    "",
+    "| Skill | Path | Description |",
+    "|-------|------|-------------|",
+    rows,
+    "",
+    "When a user's request matches a skill description above:",
+    "1. Read the skill's SKILL.md file immediately using the Read tool",
+    "2. Follow the instructions in that file exactly",
+    "3. Use the tested scripts and workflows documented there",
+  ].join("\n");
+}
+
 const CLAUDE_MD_CONTEXT = loadClaudeMdContext();
+const SKILL_INDEX = loadPlaygroundSkillIndex();
+const SYSTEM_PROMPT_APPEND = [CLAUDE_MD_CONTEXT, SKILL_INDEX]
+  .filter(Boolean)
+  .join("\n\n") || undefined;
 
 export class AIClient {
   constructor(
@@ -54,12 +163,12 @@ export class AIClient {
       extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
 
-    // Inject CLAUDE.md context so Claude subprocess has project awareness
-    if (CLAUDE_MD_CONTEXT) {
+    // Inject CLAUDE.md context + skill index so Claude subprocess has project awareness
+    if (SYSTEM_PROMPT_APPEND) {
       options.systemPrompt = {
         type: 'preset',
         preset: 'claude_code',
-        append: CLAUDE_MD_CONTEXT
+        append: SYSTEM_PROMPT_APPEND
       };
     }
 
@@ -187,12 +296,12 @@ export class AIClient {
       extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
 
-    // Inject CLAUDE.md context so Claude subprocess has project awareness
-    if (CLAUDE_MD_CONTEXT) {
+    // Inject CLAUDE.md context + skill index so Claude subprocess has project awareness
+    if (SYSTEM_PROMPT_APPEND) {
       options.systemPrompt = {
         type: 'preset',
         preset: 'claude_code',
-        append: CLAUDE_MD_CONTEXT
+        append: SYSTEM_PROMPT_APPEND
       };
     }
 

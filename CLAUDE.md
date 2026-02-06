@@ -20,11 +20,10 @@ You are running locally on an **Apple M4 Mac mini** (2024) with full filesystem 
 - Add new tools and capabilities to the bot
 - Read and explore the local filesystem
 
-**Playground Subdirectory:** The `./playground/` subdirectory has additional tools and can be used as your project and file storage directory.
-- Each subfolder in `./playground/ has, or should have a CLAUDE.md associated with the tool / project that should be read when needed.
-  - For example the `./playground/iMessage` folder is tools for sending iMessages on the user's behalf. `./playground/iMessage/CLAUDE.md has instructions on how to do this.
-  - The `./playground/Aldi` folder is a skill for retreiving prices and availability of items at our local Aldi store.
-- `./playground/archive` is a dumping ground for historic or failed tools, **Do not read or use this directory** - failed projects can be moved here to limit context overload.
+**Playground Subdirectory:** The `./playground/` subdirectory contains skills, tools, and projects.
+- Available skills are auto-discovered at startup and listed in the skill index appended below.
+- Each skill has a SKILL.md with instructions. ALWAYS read it BEFORE attempting related tasks.
+- `./playground/archive` is for historic or failed tools. **Do not read or use this directory.**
 
 **File Creation Policy:** Any new projects, tasks, or multi-file work should go in the `playground/` subdirectory. Each project or task should get its own subfolder (e.g., `playground/web-scraper/`, `playground/data-analysis/`). Do NOT create files in the bot's source directories unless modifying the bot itself.
 
