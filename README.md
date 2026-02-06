@@ -102,6 +102,7 @@ Rewinds the conversation by removing recent message exchanges:
 Complete session reset:
 - Deletes SDK session file from disk (`~/.claude/projects/...`)
 - Clears all message history
+- Re-scans playground skills and `CLAUDE.local.md` so new additions take effect immediately
 - Next message starts a completely fresh conversation
 
 ## Chunked Streaming Response
@@ -206,11 +207,11 @@ Discord Message
 
 ## Playground Skills
 
-The `playground/` directory contains skills — self-contained tools that Claude can use autonomously. Skills are **auto-discovered** at startup: each subdirectory with a `SKILL.md` file is indexed and injected into the system prompt.
+The `playground/` directory contains skills — self-contained tools that Claude can use autonomously. Skills are **auto-discovered** at startup and **refreshed on `/clear`**: each subdirectory with a `SKILL.md` file is indexed and injected into the system prompt.
 
 ### How It Works
 
-1. At startup, `ai-client.ts` scans `playground/*/` for `SKILL.md` or `skill.md` files
+1. At startup (and on `/clear`), `ai-client.ts` scans `playground/*/` for `SKILL.md` or `skill.md` files
 2. YAML frontmatter (`name` + `description`) is parsed from each file
 3. A compact skill index (~100 tokens per skill) is appended to the system prompt
 4. When a user's request matches a skill description, Claude reads the full `SKILL.md` on-demand
@@ -229,7 +230,7 @@ The `playground/` directory contains skills — self-contained tools that Claude
 
    Instructions for Claude to follow...
    ```
-3. Restart the bot — the skill is auto-discovered, no other files to edit
+3. Run `/clear` (or restart the bot) — the skill is auto-discovered, no other files to edit
 
 ### Included Skills
 
@@ -273,3 +274,4 @@ src/
 - **No API key required** if Claude Code is authenticated via subscription
 - Sessions are stored in `data/sessions.json`
 - Bot requires MESSAGE_CONTENT intent in Discord Developer Portal
+- **`CLAUDE.local.md`** — Optional gitignored file for deployment-specific context (GitHub identity, SSH keys, etc.) that gets injected into the system prompt alongside `CLAUDE.md`. Use this for private config that shouldn't be checked into the repo.
