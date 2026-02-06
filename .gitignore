@@ -15,6 +15,7 @@ build/
 
 # Config files with secrets
 config.json
+CLAUDE.local.md
 
 # Logs
 logs/

@@ -6,6 +6,7 @@ import {
 } from "discord.js";
 import type { SessionManager } from "../agent/session-manager.js";
 import type { Logger } from "../logging/logger.js";
+import { refreshSystemPrompt } from "../agent/ai-client.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -104,6 +105,7 @@ export class SlashCommandHandler {
     channelId: string
   ): Promise<void> {
     await this.sessionManager.clearSession(channelId);
+    refreshSystemPrompt();
     await interaction.reply("Session cleared. Starting fresh conversation.");
   }
 

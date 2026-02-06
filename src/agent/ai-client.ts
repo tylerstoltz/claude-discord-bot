@@ -130,11 +130,34 @@ function loadPlaygroundSkillIndex(): string | undefined {
   ].join("\n");
 }
 
+// Load CLAUDE.local.md for deployment-specific context (gitignored)
+function loadLocalContext(): string | undefined {
+  const localMdPath = join(process.cwd(), "CLAUDE.local.md");
+  if (existsSync(localMdPath)) {
+    try {
+      return readFileSync(localMdPath, "utf-8");
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 const CLAUDE_MD_CONTEXT = loadClaudeMdContext();
-const SKILL_INDEX = loadPlaygroundSkillIndex();
-const SYSTEM_PROMPT_APPEND = [CLAUDE_MD_CONTEXT, SKILL_INDEX]
+const LOCAL_CONTEXT = loadLocalContext();
+let SKILL_INDEX = loadPlaygroundSkillIndex();
+let SYSTEM_PROMPT_APPEND = [CLAUDE_MD_CONTEXT, LOCAL_CONTEXT, SKILL_INDEX]
   .filter(Boolean)
   .join("\n\n") || undefined;
+
+/** Re-scan playground skills and local context. Call on /clear so new skills appear in next session. */
+export function refreshSystemPrompt(): void {
+  const localCtx = loadLocalContext();
+  SKILL_INDEX = loadPlaygroundSkillIndex();
+  SYSTEM_PROMPT_APPEND = [CLAUDE_MD_CONTEXT, localCtx, SKILL_INDEX]
+    .filter(Boolean)
+    .join("\n\n") || undefined;
+}
 
 export class AIClient {
   constructor(
