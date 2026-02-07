@@ -2,6 +2,7 @@ import type { BotConfig } from "../config.js";
 import { SessionPersistence } from "../persistence/session-store.js";
 import { AIClient } from "./ai-client.js";
 import type { PermissionHook } from "./permission-hook.js";
+import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
 import type { Logger } from "../logging/logger.js";
 import type { ProcessedImage } from "../types/attachment-types.js";
@@ -21,6 +22,7 @@ export class SessionManager {
   private activeSessions = new Map<string, ManagedSession>();
   private sessionStore: SessionPersistence;
   private permissionHook: PermissionHook | null = null;
+  private discordMcpServer: McpSdkServerConfigWithInstance | null = null;
 
   constructor(private config: BotConfig, private logger: Logger) {
     this.sessionStore = new SessionPersistence(config.sessionPersistPath);
@@ -28,6 +30,10 @@ export class SessionManager {
 
   setPermissionHook(hook: PermissionHook): void {
     this.permissionHook = hook;
+  }
+
+  setDiscordMcpServer(server: McpSdkServerConfigWithInstance): void {
+    this.discordMcpServer = server;
   }
 
   async loadPersistedSessions(): Promise<void> {
@@ -95,7 +101,7 @@ export class SessionManager {
     const abortController = new AbortController();
     session.abortController = abortController;
 
-    const aiClient = new AIClient(this.config, this.permissionHook, channelId);
+    const aiClient = new AIClient(this.config, this.permissionHook, channelId, this.discordMcpServer);
 
     try {
       const newSessionId = await aiClient.queryWithUpdater(
@@ -262,7 +268,7 @@ export class SessionManager {
     const abortController = new AbortController();
     session.abortController = abortController;
 
-    const aiClient = new AIClient(this.config, this.permissionHook, channelId);
+    const aiClient = new AIClient(this.config, this.permissionHook, channelId, this.discordMcpServer);
 
     try {
       await aiClient.queryWithMessage(

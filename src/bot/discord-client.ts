@@ -16,6 +16,8 @@ import { SlashCommandHandler, registerCommands } from "./slash-commands.js";
 import { PermissionHook } from "../agent/permission-hook.js";
 import { Logger } from "../logging/logger.js";
 import { ActivityManager } from "./activity-manager.js";
+import { createDiscordMcpServer } from "../discord/discord-mcp-server.js";
+import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 
 export class DiscordBot {
   private client: Client;
@@ -23,6 +25,7 @@ export class DiscordBot {
   private messageHandler!: MessageHandler;
   private slashCommandHandler!: SlashCommandHandler;
   private permissionHook!: PermissionHook;
+  private discordMcpServer!: McpSdkServerConfigWithInstance;
   private logger: Logger;
   private activityManager!: ActivityManager;
 
@@ -61,6 +64,11 @@ export class DiscordBot {
       );
 
       this.sessionManager.setPermissionHook(this.permissionHook);
+
+      // Create Discord MCP server for channel/message query tools
+      this.discordMcpServer = createDiscordMcpServer(this.client);
+      this.sessionManager.setDiscordMcpServer(this.discordMcpServer);
+      this.logger.info('🤖 BOT', 'Discord MCP server initialized');
 
       this.messageHandler = new MessageHandler(
         this.config,
