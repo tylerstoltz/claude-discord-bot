@@ -213,6 +213,13 @@ export class AIClient {
     // Add Discord MCP server for channel/message query tools
     if (this.discordMcpServer) {
       options.mcpServers = { discord: this.discordMcpServer };
+      options.allowedTools = [
+        ...(options.allowedTools || []),
+        "mcp__discord__discord_fetch_messages",
+        "mcp__discord__discord_list_channels",
+        "mcp__discord__discord_server_info",
+        "mcp__discord__discord_search_messages",
+      ];
     }
 
     // Add permission hooks if configured
@@ -360,6 +367,13 @@ export class AIClient {
     // Add Discord MCP server for channel/message query tools
     if (this.discordMcpServer) {
       options.mcpServers = { discord: this.discordMcpServer };
+      options.allowedTools = [
+        ...(options.allowedTools || []),
+        "mcp__discord__discord_fetch_messages",
+        "mcp__discord__discord_list_channels",
+        "mcp__discord__discord_server_info",
+        "mcp__discord__discord_search_messages",
+      ];
     }
 
     // Add permission hooks if configured
