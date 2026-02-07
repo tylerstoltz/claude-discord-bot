@@ -146,11 +146,9 @@ export class PermissionHook {
       components: [row],
     });
 
-    // Also add reactions as fallback
-    await discordMsg.react("\u2705");
-    await discordMsg.react("\u274C");
-
-    return new Promise((resolve) => {
+    // Set up pending approval IMMEDIATELY — before reactions, so fast button
+    // clicks don't hit the race window.
+    const approvalPromise = new Promise<boolean>((resolve) => {
       const timeout = setTimeout(() => {
         this.pendingApprovals.delete(toolUseId);
 
@@ -190,6 +188,12 @@ export class PermissionHook {
         timeout,
       });
     });
+
+    // Add fallback reactions (fire-and-forget — buttons are primary)
+    discordMsg.react("\u2705").catch(() => {});
+    discordMsg.react("\u274C").catch(() => {});
+
+    return approvalPromise;
   }
 
   async handleButtonInteraction(interaction: ButtonInteraction): Promise<void> {
@@ -228,6 +232,37 @@ export class PermissionHook {
         }
         break;
       }
+    }
+  }
+
+  cancelPendingApprovals(channelId: string): void {
+    for (const [toolUseId, pending] of this.pendingApprovals) {
+      if (pending.channelId !== channelId) continue;
+
+      clearTimeout(pending.timeout);
+      this.pendingApprovals.delete(toolUseId);
+
+      // Update Discord message to show cancelled
+      const channel = this.getChannel(channelId);
+      if (channel) {
+        channel.messages
+          .fetch(pending.discordMessageId)
+          .then((msg) => {
+            const cancelledEmbed = EmbedBuilder.from(msg.embeds[0])
+              .setColor(0x808080)
+              .setFooter({ text: "Cancelled — query finished" });
+            msg.edit({ embeds: [cancelledEmbed], components: [] }).catch(() => {});
+          })
+          .catch(() => {});
+      }
+
+      pending.resolve(false);
+
+      this.logger.debug(
+        "🔒 PERMISSION",
+        `Cancelled pending approval for ${pending.toolName}`,
+        `ID: ${toolUseId.slice(0, 8)}`
+      );
     }
   }
 }

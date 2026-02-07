@@ -133,6 +133,7 @@ export class SessionManager {
       if (session.abortController === abortController) {
         session.abortController = null;
       }
+      this.permissionHook?.cancelPendingApprovals(channelId);
     }
   }
 
@@ -289,6 +290,7 @@ export class SessionManager {
       if (session.abortController === abortController) {
         session.abortController = null;
       }
+      this.permissionHook?.cancelPendingApprovals(channelId);
     }
   }
 
