@@ -1,6 +1,7 @@
 import { Message, TextChannel } from "discord.js";
 import type { BotConfig } from "../config.js";
 import type { SessionManager } from "../agent/session-manager.js";
+import { AbortError } from "../agent/ai-client.js";
 import { ChunkedUpdater } from "../streaming/chunked-updater.js";
 import type { Logger } from "../logging/logger.js";
 import type { ActivityManager } from "./activity-manager.js";
@@ -110,8 +111,12 @@ export class MessageHandler {
         const duration = Date.now() - startTime;
         this.logger.complete(duration);
       } catch (error) {
-        this.logger.error('💬 MSG', 'Error processing message', (error as Error).message);
-        await updater.sendError(`Error: ${(error as Error).message}`);
+        if (error instanceof AbortError) {
+          this.logger.info('💬 MSG', 'Query aborted (session cleared or rewound)');
+        } else {
+          this.logger.error('💬 MSG', 'Error processing message', (error as Error).message);
+          await updater.sendError(`Error: ${(error as Error).message}`);
+        }
       } finally {
         session.isProcessing = false;
         this.activityManager.reset();

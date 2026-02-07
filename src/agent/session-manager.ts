@@ -14,6 +14,7 @@ export interface ManagedSession {
   sdkSessionId: string | null;
   isProcessing: boolean;
   lastActivity: Date;
+  abortController: AbortController | null;
 }
 
 export class SessionManager {
@@ -41,6 +42,7 @@ export class SessionManager {
           sdkSessionId: sessionId,
           isProcessing: false,
           lastActivity: new Date(),
+          abortController: null,
         });
         this.logger.debug('💾 SESSION', `Loaded persisted session for channel ${channelId}`);
       }
@@ -67,6 +69,7 @@ export class SessionManager {
         sdkSessionId: persistedId,
         isProcessing: false,
         lastActivity: new Date(),
+        abortController: null,
       };
 
       this.activeSessions.set(channelId, session);
@@ -89,41 +92,59 @@ export class SessionManager {
     const session = await this.getOrCreateSession(channelId);
     session.lastActivity = new Date();
 
+    const abortController = new AbortController();
+    session.abortController = abortController;
+
     const aiClient = new AIClient(this.config, this.permissionHook, channelId);
 
-    const newSessionId = await aiClient.queryWithUpdater(
-      prompt,
-      updater,
-      session.sdkSessionId || undefined,
-      {
-        onSessionInit: (sessionId) => {
-          this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
-          session.sdkSessionId = sessionId;
-          this.sessionStore.setSessionId(channelId, sessionId);
-          // Track in message history for rewind
-          this.sessionStore.pushMessageHistory(channelId, sessionId);
-          // Persist immediately
-          this.sessionStore.save().catch((err) =>
-            this.logger.error('💾 SESSION', 'Failed to persist', err.message)
-          );
+    try {
+      const newSessionId = await aiClient.queryWithUpdater(
+        prompt,
+        updater,
+        session.sdkSessionId || undefined,
+        {
+          onSessionInit: (sessionId) => {
+            this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
+            session.sdkSessionId = sessionId;
+            this.sessionStore.setSessionId(channelId, sessionId);
+            // Track in message history for rewind
+            this.sessionStore.pushMessageHistory(channelId, sessionId);
+            // Persist immediately
+            this.sessionStore.save().catch((err) =>
+              this.logger.error('💾 SESSION', 'Failed to persist', err.message)
+            );
+          },
         },
+        abortController
+      );
+
+      // Update session ID if we got a new one
+      if (newSessionId && newSessionId !== session.sdkSessionId) {
+        session.sdkSessionId = newSessionId;
+        this.sessionStore.setSessionId(channelId, newSessionId);
+        // Track in message history for rewind
+        this.sessionStore.pushMessageHistory(channelId, newSessionId);
+        await this.sessionStore.save();
       }
-    );
 
-    // Update session ID if we got a new one
-    if (newSessionId && newSessionId !== session.sdkSessionId) {
-      session.sdkSessionId = newSessionId;
-      this.sessionStore.setSessionId(channelId, newSessionId);
-      // Track in message history for rewind
-      this.sessionStore.pushMessageHistory(channelId, newSessionId);
-      await this.sessionStore.save();
+      this.sessionStore.updateActivity(channelId);
+    } finally {
+      // Clear abort controller only if it's still the one we created
+      if (session.abortController === abortController) {
+        session.abortController = null;
+      }
     }
-
-    this.sessionStore.updateActivity(channelId);
   }
 
   async clearSession(channelId: string): Promise<void> {
     const session = this.activeSessions.get(channelId);
+
+    // Abort any in-flight query before tearing down the session
+    if (session?.abortController) {
+      session.abortController.abort();
+      session.abortController = null;
+    }
+
     const sessionId = session?.sdkSessionId;
 
     // Delete SDK session file before clearing references
@@ -188,6 +209,12 @@ export class SessionManager {
   async rewindSession(channelId: string, count: number = 1): Promise<{ success: boolean; rewoundTo: string | null; messagesRemoved: number }> {
     const session = this.activeSessions.get(channelId);
 
+    // Abort any in-flight query before rewinding
+    if (session?.abortController) {
+      session.abortController.abort();
+      session.abortController = null;
+    }
+
     if (!session?.sdkSessionId) {
       return { success: false, rewoundTo: null, messagesRemoved: 0 };
     }
@@ -231,27 +258,38 @@ export class SessionManager {
     // Build user message with text + images
     const userMessage = this.buildUserMessage(text, images);
 
+    const abortController = new AbortController();
+    session.abortController = abortController;
+
     const aiClient = new AIClient(this.config, this.permissionHook, channelId);
 
-    await aiClient.queryWithMessage(
-      userMessage,
-      updater,
-      session.sdkSessionId || undefined,
-      {
-        onSessionInit: (sessionId) => {
-          this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
-          session.sdkSessionId = sessionId;
-          this.sessionStore.setSessionId(channelId, sessionId);
-          // Track in message history for rewind
-          this.sessionStore.pushMessageHistory(channelId, sessionId);
-          this.sessionStore.save().catch((err) =>
-            this.logger.error('💾 SESSION', 'Failed to persist', err.message)
-          );
+    try {
+      await aiClient.queryWithMessage(
+        userMessage,
+        updater,
+        session.sdkSessionId || undefined,
+        {
+          onSessionInit: (sessionId) => {
+            this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
+            session.sdkSessionId = sessionId;
+            this.sessionStore.setSessionId(channelId, sessionId);
+            // Track in message history for rewind
+            this.sessionStore.pushMessageHistory(channelId, sessionId);
+            this.sessionStore.save().catch((err) =>
+              this.logger.error('💾 SESSION', 'Failed to persist', err.message)
+            );
+          },
         },
-      }
-    );
+        abortController
+      );
 
-    this.sessionStore.updateActivity(channelId);
+      this.sessionStore.updateActivity(channelId);
+    } finally {
+      // Clear abort controller only if it's still the one we created
+      if (session.abortController === abortController) {
+        session.abortController = null;
+      }
+    }
   }
 
   private buildUserMessage(text: string, images: ProcessedImage[]): any {

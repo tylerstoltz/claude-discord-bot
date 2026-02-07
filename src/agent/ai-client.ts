@@ -1,9 +1,11 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, AbortError } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 import type { BotConfig } from "../config.js";
 import type { PermissionHook } from "./permission-hook.js";
 import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
+
+export { AbortError };
 
 export interface QueryCallbacks {
   onSessionInit?: (sessionId: string) => void;
@@ -168,7 +170,8 @@ export class AIClient {
 
   async *queryStream(
     prompt: string,
-    resumeSessionId?: string
+    resumeSessionId?: string,
+    abortController?: AbortController
   ): AsyncIterable<{
     type: string;
     sessionId?: string;
@@ -198,6 +201,11 @@ export class AIClient {
     // Resume session if we have a session ID
     if (resumeSessionId) {
       options.resume = resumeSessionId;
+    }
+
+    // Pass abort controller for cancellation support
+    if (abortController) {
+      options.abortController = abortController;
     }
 
     // Add permission hooks if configured
@@ -254,6 +262,9 @@ export class AIClient {
         }
       }
     } catch (error) {
+      if (error instanceof AbortError) {
+        return; // Expected cancellation, exit silently
+      }
       console.error("[AI] Query error:", error);
       throw error;
     }
@@ -263,11 +274,12 @@ export class AIClient {
     prompt: string,
     updater: ChunkedUpdater,
     resumeSessionId?: string,
-    callbacks?: QueryCallbacks
+    callbacks?: QueryCallbacks,
+    abortController?: AbortController
   ): Promise<string | null> {
     let newSessionId: string | null = null;
 
-    for await (const event of this.queryStream(prompt, resumeSessionId)) {
+    for await (const event of this.queryStream(prompt, resumeSessionId, abortController)) {
       switch (event.type) {
         case "session_init":
           newSessionId = event.sessionId || null;
@@ -299,7 +311,8 @@ export class AIClient {
     userMessage: any, // MessageParam from Anthropic SDK
     updater: ChunkedUpdater,
     resumeSessionId?: string,
-    callbacks?: QueryCallbacks
+    callbacks?: QueryCallbacks,
+    abortController?: AbortController
   ): Promise<void> {
     // Create async iterable that yields the SDK user message
     const messageStream = async function* () {
@@ -330,6 +343,11 @@ export class AIClient {
 
     if (resumeSessionId) {
       options.resume = resumeSessionId;
+    }
+
+    // Pass abort controller for cancellation support
+    if (abortController) {
+      options.abortController = abortController;
     }
 
     // Add permission hooks if configured
@@ -381,6 +399,9 @@ export class AIClient {
         }
       }
     } catch (error) {
+      if (error instanceof AbortError) {
+        return; // Expected cancellation, exit silently
+      }
       console.error("[AI] Query error:", error);
       throw error;
     }
