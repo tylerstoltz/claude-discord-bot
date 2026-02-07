@@ -10,7 +10,11 @@ const SDK_TRANSPORT_ERRORS = [
 
 function isKnownTransportError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return SDK_TRANSPORT_ERRORS.some((pattern) => message.includes(pattern));
+  const code = (error as any)?.code;
+  return (
+    SDK_TRANSPORT_ERRORS.some((pattern) => message.includes(pattern)) ||
+    code === "EPIPE"
+  );
 }
 
 process.on("unhandledRejection", (reason) => {
