@@ -269,6 +269,38 @@ src/
 - Discord bot with MESSAGE_CONTENT intent
 - Claude Code installed and authenticated (`claude login`)
 
+## Bot-to-Bot Interaction
+
+By default, the bot **ignores messages from other bots** (including other AI bots like CodexAgent). This is controlled by the `message.author.bot` check in `src/bot/message-handler.ts`:
+
+```typescript
+if (message.author.bot) {
+  return false;
+}
+```
+
+### Enabling bot-to-bot replies
+
+To allow the bot to respond when another bot @mentions it, remove or gate that check. To make it configurable, add a `respondToBots` option:
+
+1. Add to `BotConfig` in `src/config.ts`:
+   ```typescript
+   respondToBots: boolean;
+   ```
+2. Add the default in the `defaultConfig` object:
+   ```typescript
+   respondToBots: false,
+   ```
+3. Update `shouldRespond()` in `src/bot/message-handler.ts`:
+   ```typescript
+   if (message.author.bot && !this.config.respondToBots) {
+     return false;
+   }
+   ```
+4. Set `"respondToBots": true` in your `config.json`.
+
+**Warning:** If two bots both have this enabled and are in the same channel, they can enter an infinite reply loop. Add safeguards such as a cooldown, a max reply chain depth, or an allowlist of bot IDs to respond to.
+
 ## Notes
 
 - **No API key required** if Claude Code is authenticated via subscription
