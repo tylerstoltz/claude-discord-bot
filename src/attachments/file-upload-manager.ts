@@ -1,6 +1,6 @@
-import { TextChannel, AttachmentBuilder } from 'discord.js';
-import { stat, readFile } from 'fs/promises';
-import { basename, extname, resolve } from 'path';
+import { AttachmentBuilder, type SendableChannels } from 'discord.js';
+import { stat, readFile, realpath } from 'fs/promises';
+import { basename, extname, isAbsolute, relative, resolve } from 'path';
 import type { Logger } from '../logging/logger.js';
 
 export interface FileUploadConfig {
@@ -8,8 +8,36 @@ export interface FileUploadConfig {
   autoUpload: boolean;
   maxFileSize: number;
   allowedExtensions: string[];
+  allowedDirs: string[];
 }
 
+/** Files that hold the bot's own secrets. Never uploaded, whatever allowedDirs says. */
+function secretFiles(): string[] {
+  return [
+    resolve(process.env.BOT_CONFIG_PATH || 'config.json'),
+    resolve('config.json'),
+    resolve('CLAUDE.local.md'),
+    resolve('data/sessions.json'),
+  ];
+}
+
+function isInside(dir: string, file: string): boolean {
+  const rel = relative(dir, file);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+async function realpathOrResolve(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * Uploads files from Claude to Discord. Create one per reply: tracked files belong
+ * to the reply that wrote them.
+ */
 export class FileUploadManager {
   private trackedFiles: Set<string> = new Set();
 
@@ -19,7 +47,7 @@ export class FileUploadManager {
   ) {}
 
   /**
-   * Track a file written by Claude's Write tool
+   * Track a file successfully written by Claude's Write tool
    */
   trackFile(filePath: string): void {
     if (!this.config.enabled) {
@@ -34,12 +62,26 @@ export class FileUploadManager {
   }
 
   /**
-   * Validate if a file should be uploaded
+   * Validate if a file may be uploaded
    */
-  private async validateFile(filePath: string): Promise<{ valid: boolean; reason?: string }> {
+  async validateFile(filePath: string): Promise<{ valid: boolean; reason?: string; realPath?: string }> {
     try {
-      // Check if file exists
-      const stats = await stat(filePath);
+      // Resolve symlinks so a link inside an allowed dir can't point outside it
+      const realPath = await realpath(resolve(process.cwd(), filePath));
+
+      const secrets = await Promise.all(secretFiles().map(realpathOrResolve));
+      if (secrets.includes(realPath) || basename(realPath).startsWith('.env')) {
+        return { valid: false, reason: 'Bot secret file' };
+      }
+
+      if (this.config.allowedDirs.length > 0) {
+        const dirs = await Promise.all(this.config.allowedDirs.map(realpathOrResolve));
+        if (!dirs.some((dir) => isInside(dir, realPath))) {
+          return { valid: false, reason: `Outside allowed dirs (${this.config.allowedDirs.join(', ')})` };
+        }
+      }
+
+      const stats = await stat(realPath);
 
       if (!stats.isFile()) {
         return { valid: false, reason: 'Not a file' };
@@ -53,100 +95,37 @@ export class FileUploadManager {
       }
 
       // Check extension
-      const ext = extname(filePath).toLowerCase();
-      if (this.config.allowedExtensions.length > 0) {
-        if (!this.config.allowedExtensions.includes(ext)) {
-          return { valid: false, reason: `Extension ${ext} not allowed` };
-        }
+      const ext = extname(realPath).toLowerCase();
+      if (this.config.allowedExtensions.length > 0 && !this.config.allowedExtensions.includes(ext)) {
+        return { valid: false, reason: `Extension ${ext} not allowed` };
       }
 
-      return { valid: true };
+      return { valid: true, realPath };
     } catch (error) {
       return { valid: false, reason: (error as Error).message };
     }
   }
 
   /**
-   * Upload all tracked files to Discord channel
+   * Upload all tracked files (auto-upload of Write tool output)
    */
-  async uploadTrackedFiles(channel: TextChannel): Promise<number> {
-    if (!this.config.enabled || !this.config.autoUpload) {
-      this.trackedFiles.clear();
-      return 0;
-    }
-
-    if (this.trackedFiles.size === 0) {
-      return 0;
-    }
-
-    const filesToUpload: string[] = [];
-
-    // Validate all files first
-    for (const filePath of this.trackedFiles) {
-      const validation = await this.validateFile(filePath);
-
-      if (validation.valid) {
-        filesToUpload.push(filePath);
-      } else {
-        this.logger.warn('📤 UPLOAD', `Skipping ${basename(filePath)}`, validation.reason || 'unknown');
-      }
-    }
-
-    // Clear tracked files
+  async uploadTrackedFiles(channel: SendableChannels): Promise<number> {
+    const files = [...this.trackedFiles];
     this.trackedFiles.clear();
 
-    if (filesToUpload.length === 0) {
+    if (!this.config.autoUpload || files.length === 0) {
       return 0;
     }
 
-    // Create attachments
-    const attachments: AttachmentBuilder[] = [];
-
-    for (const filePath of filesToUpload) {
-      try {
-        const fileBuffer = await readFile(filePath);
-        const fileName = basename(filePath);
-
-        const attachment = new AttachmentBuilder(fileBuffer, {
-          name: fileName
-        });
-
-        attachments.push(attachment);
-        this.logger.info('📤 UPLOAD', `Prepared ${fileName}`, `${fileBuffer.length} bytes`);
-      } catch (error) {
-        this.logger.error('📤 UPLOAD', `Failed to read ${basename(filePath)}`, (error as Error).message);
-      }
-    }
-
-    if (attachments.length === 0) {
-      return 0;
-    }
-
-    // Upload to Discord
-    try {
-      await channel.send({
-        content: '📎 **Files created:**',
-        files: attachments
-      });
-
-      this.logger.info('📤 UPLOAD', `Uploaded ${attachments.length} file(s)`);
-      return attachments.length;
-    } catch (error) {
-      this.logger.error('📤 UPLOAD', 'Failed to upload files', (error as Error).message);
-      return 0;
-    }
+    return this.uploadFiles(channel, files, '📎 **Files created:**');
   }
 
   /**
-   * Manually upload specific files by path (for user-requested uploads)
+   * Upload specific files by path (used for [UPLOAD: path] markers)
    */
-  async uploadFiles(channel: TextChannel, filePaths: string[], customMessage?: string): Promise<number> {
+  async uploadFiles(channel: SendableChannels, filePaths: string[], message: string): Promise<number> {
     if (!this.config.enabled) {
       this.logger.warn('📤 UPLOAD', 'File upload is disabled in config');
-      return 0;
-    }
-
-    if (filePaths.length === 0) {
       return 0;
     }
 
@@ -155,20 +134,15 @@ export class FileUploadManager {
     for (const filePath of filePaths) {
       const validation = await this.validateFile(filePath);
 
-      if (!validation.valid) {
+      if (!validation.valid || !validation.realPath) {
         this.logger.warn('📤 UPLOAD', `Skipping ${basename(filePath)}`, validation.reason || 'unknown');
         continue;
       }
 
       try {
-        const fileBuffer = await readFile(filePath);
+        const fileBuffer = await readFile(validation.realPath);
         const fileName = basename(filePath);
-
-        const attachment = new AttachmentBuilder(fileBuffer, {
-          name: fileName
-        });
-
-        attachments.push(attachment);
+        attachments.push(new AttachmentBuilder(fileBuffer, { name: fileName }));
         this.logger.info('📤 UPLOAD', `Prepared ${fileName}`, `${fileBuffer.length} bytes`);
       } catch (error) {
         this.logger.error('📤 UPLOAD', `Failed to read ${basename(filePath)}`, (error as Error).message);
@@ -176,36 +150,16 @@ export class FileUploadManager {
     }
 
     if (attachments.length === 0) {
-      this.logger.warn('📤 UPLOAD', 'No valid files to upload');
       return 0;
     }
 
-    // Upload to Discord
     try {
-      await channel.send({
-        content: customMessage || '📎 **Files uploaded:**',
-        files: attachments
-      });
-
+      await channel.send({ content: message, files: attachments });
       this.logger.info('📤 UPLOAD', `Uploaded ${attachments.length} file(s)`);
       return attachments.length;
     } catch (error) {
       this.logger.error('📤 UPLOAD', 'Failed to upload files', (error as Error).message);
       return 0;
     }
-  }
-
-  /**
-   * Clear all tracked files without uploading
-   */
-  clear(): void {
-    this.trackedFiles.clear();
-  }
-
-  /**
-   * Get count of tracked files
-   */
-  getTrackedCount(): number {
-    return this.trackedFiles.size;
   }
 }

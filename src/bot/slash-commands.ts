@@ -1,9 +1,11 @@
 import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
+  MessageFlags,
   REST,
   Routes,
 } from "discord.js";
+import { isChannelAllowed, isUserAllowed, type BotConfig } from "../config.js";
 import type { SessionManager } from "../agent/session-manager.js";
 import type { Logger } from "../logging/logger.js";
 import { refreshSystemPrompt } from "../agent/ai-client.js";
@@ -11,7 +13,7 @@ import { refreshSystemPrompt } from "../agent/ai-client.js";
 export const commands = [
   new SlashCommandBuilder()
     .setName("compact")
-    .setDescription("Show conversation context info (SDK auto-compacts when needed)"),
+    .setDescription("Summarize the conversation so far to free up context"),
   new SlashCommandBuilder()
     .setName("clear")
     .setDescription("Clear the current session and start fresh"),
@@ -20,7 +22,7 @@ export const commands = [
     .setDescription("Show the current session status"),
   new SlashCommandBuilder()
     .setName("rewind")
-    .setDescription("Rewind the conversation by removing recent messages")
+    .setDescription("Rewind the conversation by removing recent exchanges")
     .addIntegerOption((option) =>
       option
         .setName("count")
@@ -31,7 +33,7 @@ export const commands = [
     ),
 ];
 
-export async function registerCommands(token: string, clientId: string, guildId?: string): Promise<void> {
+export async function registerCommands(token: string, clientId: string, logger: Logger, guildId?: string): Promise<void> {
   const rest = new REST().setToken(token);
 
   const route = guildId
@@ -41,21 +43,38 @@ export async function registerCommands(token: string, clientId: string, guildId?
   const scope = guildId ? `guild ${guildId.slice(-6)}` : 'global';
 
   try {
-    console.log(`Registering slash commands (${scope})...`);
     await rest.put(route, {
       body: commands.map((cmd) => cmd.toJSON()),
     });
-    console.log(`Slash commands registered successfully (${scope}).`);
+    logger.info('🤖 BOT', `Slash commands registered (${scope})`);
   } catch (error) {
-    console.error("Failed to register slash commands:", error);
+    logger.error('🤖 BOT', 'Failed to register slash commands', (error as Error).message);
   }
 }
 
 export class SlashCommandHandler {
-  constructor(private sessionManager: SessionManager, private logger?: Logger) {}
+  constructor(
+    private config: BotConfig,
+    private sessionManager: SessionManager,
+    private logger: Logger
+  ) {}
 
   async handleInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
     const channelId = interaction.channelId;
+    const parentId = interaction.channel?.isThread() ? interaction.channel.parentId : null;
+
+    if (
+      !isUserAllowed(this.config, interaction.user.id) ||
+      !isChannelAllowed(this.config, channelId, parentId)
+    ) {
+      await interaction.reply({
+        content: "You can't use this bot's commands here.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    this.logger.channelActivity(channelId, `/${interaction.commandName}`, `by ${interaction.user.id}`);
 
     switch (interaction.commandName) {
       case "compact":
@@ -73,7 +92,7 @@ export class SlashCommandHandler {
       default:
         await interaction.reply({
           content: "Unknown command.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
     }
   }
@@ -84,19 +103,22 @@ export class SlashCommandHandler {
   ): Promise<void> {
     await interaction.deferReply();
 
-    const result = await this.sessionManager.compactSession(channelId);
+    // Runs in the channel queue, after any reply in progress
+    const result = await this.sessionManager.runExclusive(channelId, () =>
+      this.sessionManager.compactSession(channelId)
+    );
 
-    if (!result.success) {
-      await interaction.editReply("❌ No active session to show info for.");
+    if (!result.compacted) {
+      await interaction.editReply(`❌ Couldn't compact: ${result.error}`);
       return;
     }
 
+    const tokens = result.postTokens !== undefined
+      ? `**${result.preTokens}** → **${result.postTokens}** tokens`
+      : `**${result.preTokens}** tokens summarized`;
     await interaction.editReply(
-      `📊 **Session Context Info**\n\n` +
-      `• Messages in history: **${result.messageCount}**\n` +
-      `• The SDK automatically compacts context when it grows large\n` +
-      `• Use \`/clear\` for a fresh start, or \`/rewind\` to remove recent messages\n\n` +
-      `💡 Your next message will continue with the current context.`
+      `🗜️ **Conversation compacted** (${tokens})\n\n` +
+      `💡 Your next message continues from the summary. Earlier exchanges can no longer be rewound.`
     );
   }
 
@@ -104,9 +126,11 @@ export class SlashCommandHandler {
     interaction: ChatInputCommandInteraction,
     channelId: string
   ): Promise<void> {
+    // Clearing waits for any running reply to stop, which can exceed Discord's 3s reply window
+    await interaction.deferReply();
     await this.sessionManager.clearSession(channelId);
     refreshSystemPrompt();
-    await interaction.reply("Session cleared. Starting fresh conversation.");
+    await interaction.editReply("Session cleared. Starting fresh conversation.");
   }
 
   private async handleStatus(
@@ -118,7 +142,7 @@ export class SlashCommandHandler {
     if (!session) {
       await interaction.reply({
         content: "No active session in this channel.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -126,11 +150,13 @@ export class SlashCommandHandler {
     const status = [
       `**Session Status**`,
       `- Session ID: \`${session.sdkSessionId || "Not started"}\``,
-      `- Processing: ${session.isProcessing ? "Yes" : "No"}`,
+      `- Processing: ${session.isProcessing ? "Yes" : "No"}${session.queued > 0 ? ` (${session.queued} queued)` : ""}`,
+      `- Rewindable exchanges: ${this.sessionManager.getTurnCount(channelId)}`,
+      ...(this.sessionManager.hasPendingRewind(channelId) ? [`- Rewound: next message continues from an earlier point`] : []),
       `- Last Activity: ${session.lastActivity.toLocaleString()}`,
     ].join("\n");
 
-    await interaction.reply({ content: status, ephemeral: true });
+    await interaction.reply({ content: status, flags: MessageFlags.Ephemeral });
   }
 
   private async handleRewind(
@@ -148,17 +174,16 @@ export class SlashCommandHandler {
       return;
     }
 
-    if (result.messagesRemoved === 0) {
-      await interaction.editReply("⚠️ No messages to rewind. The session is already at the beginning.");
+    if (result.removed === 0) {
+      await interaction.editReply("⚠️ Nothing to rewind (no recorded exchanges since the session started or was last compacted).");
       return;
     }
 
     let message = `⏪ **Rewound conversation**\n\n`;
-    message += `• Removed **${result.messagesRemoved}** message${result.messagesRemoved > 1 ? 's' : ''} from history\n`;
+    message += `• Removed the last **${result.removed}** exchange${result.removed > 1 ? 's' : ''}\n`;
 
-    if (result.rewoundTo) {
-      message += `• Conversation reset to session: \`${result.rewoundTo.slice(0, 8)}...\`\n`;
-      message += `\n💡 Your next message will continue from the earlier point in the conversation.`;
+    if (result.remaining > 0) {
+      message += `\n💡 Your next message continues from the earlier point in the conversation.`;
     } else {
       message += `• Session reset to the beginning\n`;
       message += `\n💡 Your next message will start a fresh conversation.`;

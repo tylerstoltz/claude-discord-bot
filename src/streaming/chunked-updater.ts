@@ -1,21 +1,39 @@
-import { Message, TextChannel } from "discord.js";
-import { splitMessage, formatStreamingMessage } from "./message-splitter.js";
+import type { Message, SendableChannels } from "discord.js";
+import { takeChunk } from "./message-splitter.js";
 import type { Logger } from "../logging/logger.js";
 import type { ActivityManager } from "../bot/activity-manager.js";
 import type { FileUploadManager } from "../attachments/file-upload-manager.js";
 
+/**
+ * Streams Claude's output into Discord messages.
+ *
+ * Edits the current message at most every `updateIntervalMs`. When the text outgrows
+ * one message, the current message is finished at a natural break and a new one is
+ * started, so long replies keep streaming instead of freezing at the size limit.
+ */
 export class ChunkedUpdater {
+  private buffer = "";
+  // Characters of `buffer` already posted in finished (earlier) messages
+  private committed = 0;
+  // Fence-reopening prefix for the current message when a split fell inside a code block
+  private carry = "";
   private currentMessage: Message | null = null;
-  private contentBuffer: string = "";
-  private lastUpdateTime: number = 0;
+  private lastShown = "";
+  private sentAny = false;
+
   private updateTimer: NodeJS.Timeout | null = null;
-  private isEditing: boolean = false;
-  private pendingUpdate: boolean = false;
-  private rateLimitBackoffMs: number = 1000;
-  private consecutiveRateLimits: number = 0;
+  private lastRenderTime = 0;
+  // Renders run one at a time, in order
+  private renderChain: Promise<void> = Promise.resolve();
+  private finalized = false;
+
+  // Claude's own text (no tool previews) — scanned for [UPLOAD: path] markers
+  private assistantText = "";
+  // Write tool calls awaiting their result: tool_use_id -> file_path
+  private pendingWrites = new Map<string, string>();
 
   constructor(
-    private channel: TextChannel,
+    private channel: SendableChannels,
     private replyTo: Message,
     private updateIntervalMs: number = 3000,
     private maxMessageLength: number = 2000,
@@ -25,14 +43,24 @@ export class ChunkedUpdater {
   ) {}
 
   appendContent(content: string): void {
-    this.contentBuffer += content;
-    this.logger?.streaming(this.contentBuffer.length);
+    if (this.finalized) return;
+    this.buffer += content;
+    this.assistantText += content;
+    this.logger?.streaming(this.buffer.length);
     this.activityManager?.setStatus('writing');
     this.scheduleUpdate();
   }
 
-  onToolUse(toolName: string, toolInput: unknown): void {
-    // Add tool indicator
+  /** Append bot-generated text (warnings, errors) that is not part of Claude's reply. */
+  appendNotice(notice: string): void {
+    if (this.finalized) return;
+    this.buffer += `\n\n${notice}`;
+    this.scheduleUpdate();
+  }
+
+  onToolUse(toolName: string, toolInput: unknown, toolUseId: string): void {
+    if (this.finalized) return;
+
     let inputPreview = "";
     try {
       const inputStr = JSON.stringify(toolInput);
@@ -44,172 +72,127 @@ export class ChunkedUpdater {
     this.logger?.toolUse(toolName, inputPreview);
     this.activityManager?.setStatus('working');
 
-    // Track Write tool usage for file uploads
-    if (toolName === 'Write' && this.fileUploadManager) {
-      try {
-        const input = toolInput as { file_path?: string };
-        if (input.file_path) {
-          this.fileUploadManager.trackFile(input.file_path);
-        }
-      } catch (error) {
-        this.logger?.debug('📤 UPLOAD', 'Failed to track Write tool', (error as Error).message);
-      }
+    // Remember Write calls; the file is only uploaded once the write actually succeeds
+    const filePath = (toolInput as { file_path?: unknown } | null)?.file_path;
+    if (toolName === 'Write' && typeof filePath === 'string') {
+      this.pendingWrites.set(toolUseId, filePath);
     }
 
-    this.contentBuffer += `\n\n> **Using:** \`${toolName}\`\n> ${inputPreview}\n\n`;
+    this.buffer += `\n\n> **Using:** \`${toolName}\`\n> ${inputPreview}\n\n`;
 
-    // Force immediate update on tool use
-    this.flushUpdate();
+    // Show tool use immediately
+    this.flushNow();
+  }
+
+  onToolResult(toolUseId: string, isError: boolean): void {
+    const filePath = this.pendingWrites.get(toolUseId);
+    if (!filePath) return;
+    this.pendingWrites.delete(toolUseId);
+    // Denied or failed writes return an error result — don't upload (the file may be stale)
+    if (!isError) {
+      this.fileUploadManager?.trackFile(filePath);
+    }
   }
 
   private scheduleUpdate(): void {
-    if (this.updateTimer) {
+    if (this.updateTimer || this.finalized) {
       return;
     }
 
-    const timeSinceLastUpdate = Date.now() - this.lastUpdateTime;
-    const delay = Math.max(0, this.updateIntervalMs - timeSinceLastUpdate);
-
+    const delay = Math.max(0, this.updateIntervalMs - (Date.now() - this.lastRenderTime));
     this.updateTimer = setTimeout(() => {
       this.updateTimer = null;
-      this.flushUpdate();
+      this.enqueueRender(false);
     }, delay);
   }
 
-  async flushUpdate(): Promise<void> {
-    if (!this.contentBuffer || this.isEditing) {
-      this.pendingUpdate = true;
-      return;
-    }
-
-    const contentToSend = this.contentBuffer;
-    this.isEditing = true;
-    this.pendingUpdate = false;
-
-    try {
-      if (!this.currentMessage) {
-        // First message - send as reply
-        const formatted = formatStreamingMessage(
-          contentToSend,
-          this.maxMessageLength,
-          false
-        );
-        this.currentMessage = await this.replyTo.reply(formatted);
-      } else {
-        // Edit existing message
-        const formatted = formatStreamingMessage(
-          contentToSend,
-          this.maxMessageLength,
-          false
-        );
-        await this.currentMessage.edit(formatted);
-      }
-
-      this.lastUpdateTime = Date.now();
-      this.consecutiveRateLimits = 0;
-    } catch (error: any) {
-      // Handle rate limits
-      if (
-        error.code === 50013 ||
-        error.message?.includes("rate limit") ||
-        error.httpStatus === 429
-      ) {
-        this.consecutiveRateLimits++;
-        const backoff = this.rateLimitBackoffMs * Math.pow(2, this.consecutiveRateLimits - 1);
-
-        this.logger?.warn('✍️  STREAM', `Rate limited, backing off ${backoff}ms`);
-
-        await this.sleep(backoff);
-        this.pendingUpdate = true;
-      } else {
-        this.logger?.error('✍️  STREAM', 'Error updating message', (error as Error).message);
-      }
-    } finally {
-      this.isEditing = false;
-
-      // Process pending update if any
-      if (this.pendingUpdate && this.contentBuffer) {
-        this.scheduleUpdate();
-      }
-    }
-  }
-
-  async finalize(): Promise<void> {
-    // Clear streaming indicator
-    this.logger?.streamingComplete();
-
-    // Reset activity status to idle
-    this.activityManager?.reset();
-
-    // Clear any pending timer
+  private flushNow(): void {
     if (this.updateTimer) {
       clearTimeout(this.updateTimer);
       this.updateTimer = null;
     }
+    this.enqueueRender(false);
+  }
 
-    // Wait for any in-progress edit
-    while (this.isEditing) {
-      await this.sleep(100);
+  private enqueueRender(final: boolean): Promise<void> {
+    this.renderChain = this.renderChain
+      .then(() => this.render(final))
+      .catch((error) => {
+        this.logger?.error('✍️  STREAM', 'Render failed', (error as Error).message);
+      });
+    return this.renderChain;
+  }
+
+  private async render(final: boolean): Promise<void> {
+    // A streaming render queued before finalize() must not run after it
+    if (this.finalized && !final) return;
+    this.lastRenderTime = Date.now();
+
+    for (;;) {
+      const tail = this.carry + this.buffer.slice(this.committed);
+      if (tail.length <= this.maxMessageLength) {
+        await this.show(tail);
+        return;
+      }
+
+      // Finish the current message at a natural break and continue in a new one
+      const chunk = takeChunk(tail, this.maxMessageLength);
+      await this.show(chunk.text);
+      this.currentMessage = null;
+      this.lastShown = "";
+
+      this.committed += chunk.consumed - this.carry.length;
+      while (this.committed < this.buffer.length && /\s/.test(this.buffer[this.committed])) {
+        this.committed++;
+      }
+      this.carry = chunk.carry;
     }
+  }
 
-    // Send final content
-    if (!this.contentBuffer) {
-      // Upload files even if no text content
-      await this.uploadFiles();
-      return;
-    }
+  private async show(text: string): Promise<void> {
+    if (!text.trim() || text === this.lastShown) return;
 
-    const finalContent = this.contentBuffer;
-
-    // Check if content fits in one message
-    if (finalContent.length <= this.maxMessageLength) {
+    try {
       if (this.currentMessage) {
-        try {
-          await this.currentMessage.edit(finalContent);
-        } catch (error) {
-          this.logger?.error('✍️  STREAM', 'Failed to edit final message', (error as Error).message);
-        }
+        await this.currentMessage.edit(text);
       } else {
-        try {
-          await this.replyTo.reply(finalContent);
-        } catch (error) {
-          this.logger?.error('✍️  STREAM', 'Failed to send final message', (error as Error).message);
-        }
+        // First message replies to the user; continuations are plain follow-ups
+        this.currentMessage = this.sentAny
+          ? await this.channel.send(text)
+          : await this.replyTo.reply(text);
+        this.sentAny = true;
       }
-    } else {
-      // Split into multiple messages
-      const chunks = splitMessage(finalContent, this.maxMessageLength);
-
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-
-        try {
-          if (i === 0 && this.currentMessage) {
-            // Edit first message
-            await this.currentMessage.edit(chunk);
-          } else if (i === 0) {
-            // Send first as reply
-            await this.replyTo.reply(chunk);
-          } else {
-            // Send rest as follow-ups
-            await this.channel.send(chunk);
-          }
-        } catch (error) {
-          this.logger?.error('✍️  STREAM', `Failed to send chunk ${i}`, (error as Error).message);
-        }
-
-        // Small delay between messages to avoid rate limits
-        if (i < chunks.length - 1) {
-          await this.sleep(500);
-        }
-      }
+      this.lastShown = text;
+    } catch (error) {
+      // discord.js already retries rate limits; anything reaching here is a real failure
+      this.logger?.error('✍️  STREAM', 'Failed to send/edit message', (error as Error).message);
     }
+  }
 
-    // Upload tracked files after sending text
-    await this.uploadFiles();
+  async finalize(): Promise<void> {
+    if (this.finalized) return;
 
-    // Parse and upload any files mentioned in upload markers
-    await this.parseAndUploadMarkers(finalContent);
+    // Clear streaming indicator
+    this.logger?.streamingComplete();
+
+    if (this.updateTimer) {
+      clearTimeout(this.updateTimer);
+      this.updateTimer = null;
+    }
+    this.finalized = true;
+
+    // Waits for any in-flight render, then posts the complete text
+    await this.enqueueRender(true);
+
+    // Upload files written this turn, then any [UPLOAD: path] markers
+    await this.uploadTrackedFiles();
+    await this.parseAndUploadMarkers(this.assistantText);
+  }
+
+  /** Append an error to the reply and finalize it. */
+  async fail(errorMessage: string): Promise<void> {
+    this.appendNotice(`**Error:** ${errorMessage}`);
+    await this.finalize();
   }
 
   private async parseAndUploadMarkers(content: string): Promise<void> {
@@ -219,87 +202,30 @@ export class ChunkedUpdater {
 
     // Look for upload markers: [UPLOAD: /path/to/file.png]
     const uploadMarkerRegex = /\[UPLOAD:\s*(.+?)\]/g;
-    const matches = [...content.matchAll(uploadMarkerRegex)];
+    const filePaths = [...content.matchAll(uploadMarkerRegex)].map((m) => m[1].trim());
 
-    if (matches.length === 0) {
+    if (filePaths.length === 0) {
       return;
     }
 
-    const filePaths = matches.map(m => m[1].trim());
-
-    try {
-      const uploadedCount = await this.fileUploadManager.uploadFiles(
-        this.channel,
-        filePaths,
-        '📎 **Here are your files:**'
-      );
-
-      if (uploadedCount > 0) {
-        this.logger?.info('📤 UPLOAD', `Uploaded ${uploadedCount} file(s) via markers`);
-      }
-    } catch (error) {
-      this.logger?.error('📤 UPLOAD', 'Failed to upload marked files', (error as Error).message);
+    const uploadedCount = await this.fileUploadManager.uploadFiles(
+      this.channel,
+      filePaths,
+      '📎 **Here are your files:**'
+    );
+    if (uploadedCount > 0) {
+      this.logger?.info('📤 UPLOAD', `Uploaded ${uploadedCount} file(s) via markers`);
     }
   }
 
-  private async uploadFiles(): Promise<void> {
+  private async uploadTrackedFiles(): Promise<void> {
     if (!this.fileUploadManager) {
       return;
     }
 
-    try {
-      const uploadedCount = await this.fileUploadManager.uploadTrackedFiles(this.channel);
-      if (uploadedCount > 0) {
-        this.logger?.info('📤 UPLOAD', `Uploaded ${uploadedCount} file(s) to Discord`);
-      }
-    } catch (error) {
-      this.logger?.error('📤 UPLOAD', 'Failed to upload files', (error as Error).message);
+    const uploadedCount = await this.fileUploadManager.uploadTrackedFiles(this.channel);
+    if (uploadedCount > 0) {
+      this.logger?.info('📤 UPLOAD', `Uploaded ${uploadedCount} file(s) to Discord`);
     }
-  }
-
-  /**
-   * Manually upload specific files (exposed for Claude to use during conversation)
-   */
-  async uploadSpecificFiles(filePaths: string[], customMessage?: string): Promise<number> {
-    if (!this.fileUploadManager) {
-      return 0;
-    }
-
-    return await this.fileUploadManager.uploadFiles(this.channel, filePaths, customMessage);
-  }
-
-  /**
-   * Get the file upload manager (for access to upload methods)
-   */
-  getFileUploadManager(): typeof this.fileUploadManager {
-    return this.fileUploadManager;
-  }
-
-  /**
-   * Get the channel (for manual sends)
-   */
-  getChannel(): TextChannel {
-    return this.channel;
-  }
-
-  async sendError(errorMessage: string): Promise<void> {
-    const formatted = `**Error:** ${errorMessage}`;
-
-    try {
-      if (this.currentMessage) {
-        const content = this.contentBuffer
-          ? this.contentBuffer + "\n\n" + formatted
-          : formatted;
-        await this.currentMessage.edit(content.slice(0, this.maxMessageLength));
-      } else {
-        await this.replyTo.reply(formatted);
-      }
-    } catch (error) {
-      this.logger?.error('✍️  STREAM', 'Failed to send error message', (error as Error).message);
-    }
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

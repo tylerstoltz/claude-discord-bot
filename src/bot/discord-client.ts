@@ -4,6 +4,7 @@ import {
   Events,
   Interaction,
   Message,
+  MessageFlags,
   MessageReaction,
   User,
   PartialMessageReaction,
@@ -17,17 +18,14 @@ import { PermissionHook } from "../agent/permission-hook.js";
 import { Logger } from "../logging/logger.js";
 import { ActivityManager } from "./activity-manager.js";
 import { createDiscordMcpServer } from "../discord/discord-mcp-server.js";
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 
 export class DiscordBot {
   private client: Client;
   private sessionManager: SessionManager;
-  private messageHandler!: MessageHandler;
-  private slashCommandHandler!: SlashCommandHandler;
-  private permissionHook!: PermissionHook;
-  private discordMcpServer!: McpSdkServerConfigWithInstance;
+  private messageHandler?: MessageHandler;
+  private slashCommandHandler?: SlashCommandHandler;
+  private permissionHook?: PermissionHook;
   private logger: Logger;
-  private activityManager!: ActivityManager;
 
   constructor(private config: BotConfig) {
     this.logger = new Logger(config.logLevel, config.logTimestamps, config.logColors);
@@ -46,68 +44,80 @@ export class DiscordBot {
     this.setupEventHandlers();
   }
 
+  /**
+   * Wrap an async event handler so a failure is logged instead of becoming an
+   * unhandled rejection (which exits the process).
+   */
+  private guard<A extends unknown[]>(name: string, handler: (...args: A) => Promise<void>) {
+    return (...args: A): void => {
+      handler(...args).catch((error) => {
+        this.logger.error('🤖 BOT', `Unhandled error in ${name} handler`, (error as Error)?.stack || String(error));
+      });
+    };
+  }
+
   private setupEventHandlers(): void {
-    this.client.once(Events.ClientReady, async (readyClient) => {
+    this.client.once(Events.ClientReady, this.guard('ready', async (readyClient: Client<true>) => {
       this.logger.info('🤖 BOT', `Logged in as ${readyClient.user.tag}`);
 
-      // Initialize activity manager
-      this.activityManager = new ActivityManager(this.client);
+      const activityManager = new ActivityManager(this.client);
+      activityManager.setStatus('idle', true);
 
-      // Set initial status to idle
-      this.activityManager.setStatus('idle', true);
-
-      // Initialize components that need the bot user ID
       this.permissionHook = new PermissionHook(
         this.config,
         (channelId) => this.client.channels.cache.get(channelId) as any,
         this.logger
       );
-
       this.sessionManager.setPermissionHook(this.permissionHook);
 
       // Create Discord MCP server for channel/message query tools
-      this.discordMcpServer = createDiscordMcpServer(this.client);
-      this.sessionManager.setDiscordMcpServer(this.discordMcpServer);
+      this.sessionManager.setDiscordMcpServer(createDiscordMcpServer(this.client, this.config));
       this.logger.info('🤖 BOT', 'Discord MCP server initialized');
 
+      this.slashCommandHandler = new SlashCommandHandler(this.config, this.sessionManager, this.logger);
+
+      // Register slash commands
+      await registerCommands(this.config.discordToken, readyClient.user.id, this.logger, this.config.guildId);
+
+      // Accept messages last, once everything above is ready
       this.messageHandler = new MessageHandler(
         this.config,
         this.sessionManager,
         readyClient.user.id,
         this.logger,
-        this.activityManager
+        activityManager
       );
 
-      this.slashCommandHandler = new SlashCommandHandler(this.sessionManager, this.logger);
-
-      // Register slash commands
-      await registerCommands(this.config.discordToken, readyClient.user.id, this.config.guildId);
-
-      // Load persisted sessions
-      await this.sessionManager.loadPersistedSessions();
-
       this.logger.info('🤖 BOT', 'Ready to receive messages');
-    });
+    }));
 
-    this.client.on(Events.MessageCreate, async (message: Message) => {
-      if (this.messageHandler) {
-        await this.messageHandler.handleMessage(message);
-      }
-    });
+    this.client.on(Events.MessageCreate, this.guard('message', async (message: Message) => {
+      await this.messageHandler?.handleMessage(message);
+    }));
 
-    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-      if (interaction.isChatInputCommand() && this.slashCommandHandler) {
-        await this.slashCommandHandler.handleInteraction(interaction);
+    this.client.on(Events.InteractionCreate, this.guard('interaction', async (interaction: Interaction) => {
+      try {
+        if (interaction.isChatInputCommand() && this.slashCommandHandler) {
+          await this.slashCommandHandler.handleInteraction(interaction);
+        } else if (interaction.isButton() && this.permissionHook) {
+          await this.permissionHook.handleButtonInteraction(interaction);
+        }
+      } catch (error) {
+        // Tell the user something went wrong, if the interaction is still answerable
+        if (interaction.isRepliable()) {
+          const reply = { content: `❌ Error: ${(error as Error).message}`, flags: MessageFlags.Ephemeral } as const;
+          const send = interaction.deferred || interaction.replied
+            ? interaction.followUp(reply)
+            : interaction.reply(reply);
+          await send.catch(() => {});
+        }
+        throw error;
       }
-
-      if (interaction.isButton() && this.permissionHook) {
-        await this.permissionHook.handleButtonInteraction(interaction);
-      }
-    });
+    }));
 
     this.client.on(
       Events.MessageReactionAdd,
-      async (
+      this.guard('reaction', async (
         reaction: MessageReaction | PartialMessageReaction,
         user: User | PartialUser
       ) => {
@@ -122,14 +132,12 @@ export class DiscordBot {
           }
         }
 
-        if (this.permissionHook) {
-          this.permissionHook.handleReaction(
-            reaction.message.id,
-            reaction.emoji.name || "",
-            user.id
-          );
-        }
-      }
+        this.permissionHook?.handleReaction(
+          reaction.message.id,
+          reaction.emoji.name || "",
+          user.id
+        );
+      })
     );
 
     this.client.on(Events.Error, (error) => {
@@ -138,6 +146,17 @@ export class DiscordBot {
   }
 
   async start(): Promise<void> {
+    if (this.config.allowedUsers.length === 0) {
+      this.logger.warn(
+        '🔒 ACCESS',
+        'allowedUsers is empty: ANYONE who can message the bot can use it and approve tool calls. ' +
+        'Set allowedUsers in config.json to your Discord user ID(s).'
+      );
+    }
+
+    // Load persisted sessions before any message can arrive
+    await this.sessionManager.loadPersistedSessions();
+
     this.logger.info('🤖 BOT', 'Connecting to Discord...');
     await this.client.login(this.config.discordToken);
   }
@@ -146,10 +165,6 @@ export class DiscordBot {
     this.logger.info('🤖 BOT', 'Saving sessions...');
     await this.sessionManager.persistSessions();
     this.logger.info('🤖 BOT', 'Disconnecting...');
-    this.client.destroy();
-  }
-
-  getClient(): Client {
-    return this.client;
+    await this.client.destroy();
   }
 }

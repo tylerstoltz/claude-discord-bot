@@ -1,5 +1,5 @@
 import type { Attachment } from 'discord.js';
-import type { ProcessedImage, AttachmentConfig } from '../types/attachment-types.js';
+import type { ProcessedImage, AttachmentConfig, ImageMediaType } from '../types/attachment-types.js';
 import type { Logger } from '../logging/logger.js';
 
 export class ImageProcessor {
@@ -86,7 +86,7 @@ export class ImageProcessor {
    * Detect image format from file header (magic bytes)
    * This is more reliable than trusting the Content-Type header
    */
-  private detectImageFormat(buffer: Buffer): string | null {
+  private detectImageFormat(buffer: Buffer): ImageMediaType | null {
     if (buffer.length < 12) {
       return null;
     }

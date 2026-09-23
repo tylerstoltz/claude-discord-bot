@@ -1,7 +1,9 @@
+export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+
 export interface ProcessedImage {
   source: {
     type: 'base64';
-    media_type: string;
+    media_type: ImageMediaType;
     data: string;
   };
   name: string;

@@ -34,8 +34,20 @@ export class ActivityManager {
     this.client.user?.setActivity(statusMap[status]);
   }
 
-  reset(): void {
-    // Force the reset to bypass throttling - we always want to return to idle
-    this.setStatus('idle', true);
+  private activeQueries = 0;
+
+  /** Mark a query as started (status is shared across channels). */
+  begin(): void {
+    this.activeQueries++;
+    this.setStatus('thinking');
+  }
+
+  /** Mark a query as finished; returns to idle once no channel is busy. */
+  end(): void {
+    this.activeQueries = Math.max(0, this.activeQueries - 1);
+    if (this.activeQueries === 0) {
+      // Force the reset to bypass throttling - we always want to return to idle
+      this.setStatus('idle', true);
+    }
   }
 }
