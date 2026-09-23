@@ -1,6 +1,7 @@
 {
   "discordToken": "YOUR_BOT_TOKEN_HERE",
   "guildId": "YOUR_GUILD_ID_HERE",
+  "allowedUsers": ["YOUR_DISCORD_USER_ID"],
   "monitorMentions": true,
   "monitorAllMessages": false,
   "allowedChannels": [],
@@ -8,10 +9,11 @@
   "model": "sonnet",
   "enableChrome": false,
   "allowedTools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
-  "dangerousTools": ["Bash", "Write", "Edit"],
+  "dangerousTools": ["Bash", "Write", "Edit", "MultiEdit"],
   "updateIntervalMs": 3000,
   "sessionPersistPath": "./data/sessions.json",
   "permissionTimeoutMs": 60000,
+  "maxQueuedMessages": 5,
 
   "logLevel": "info",
   "logTimestamps": true,
@@ -27,6 +29,7 @@
     "enabled": true,
     "autoUpload": true,
     "maxFileSize": 26214400,
-    "allowedExtensions": [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml"]
+    "allowedExtensions": [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm"],
+    "allowedDirs": ["./playground"]
   }
 }

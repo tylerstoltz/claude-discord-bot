@@ -5,8 +5,10 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ButtonInteraction,
+  MessageFlags,
 } from "discord.js";
-import type { BotConfig } from "../config.js";
+import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
+import { isUserAllowed, type BotConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
 
 interface PendingApproval {
@@ -15,7 +17,8 @@ interface PendingApproval {
   toolInput: unknown;
   discordMessageId: string;
   channelId: string;
-  resolve: (approved: boolean) => void;
+  // cancelledText: settle as denied and show this footer instead of "Denied"
+  resolve: (approved: boolean, byUserId?: string, cancelledText?: string) => void;
   timeout: NodeJS.Timeout;
 }
 
@@ -28,25 +31,17 @@ export class PermissionHook {
     private logger: Logger
   ) {}
 
-  createHookHandler(channelId: string) {
-    return async (
-      input: { tool_name: string; tool_input: unknown },
-      toolUseId?: string
-    ): Promise<{
-      continue?: boolean;
-      hookSpecificOutput?: {
-        hookEventName: 'PreToolUse';
-        permissionDecision?: 'allow' | 'deny';
-        permissionDecisionReason?: string;
-      };
-    }> => {
+  createHookHandler(channelId: string): HookCallback {
+    return async (input, toolUseId, { signal }): Promise<HookJSONOutput> => {
+      if (input.hook_event_name !== 'PreToolUse') {
+        return {};
+      }
       const toolName = input.tool_name;
       const toolInput = input.tool_input;
 
       // Check if this is a dangerous tool
       if (!this.config.dangerousTools.includes(toolName)) {
         return {
-          continue: true,
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
             permissionDecision: 'allow'
@@ -54,11 +49,12 @@ export class PermissionHook {
         };
       }
 
+      // Denials don't set `continue: false`: that would stop Claude's whole turn,
+      // whereas a plain deny lets it read the reason and try something else.
       const channel = this.getChannel(channelId);
       if (!channel) {
         this.logger.error('🔒 PERMISSION', `Channel ${channelId.slice(-6)} not found`);
         return {
-          continue: false,
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
             permissionDecision: 'deny',
@@ -71,27 +67,21 @@ export class PermissionHook {
 
       this.logger.info('🔒 PERMISSION', `Requesting approval for ${toolName}`, `ID: ${id.slice(0, 8)}`);
 
-      const approved = await this.requestApproval(channel, toolName, toolInput, id);
-
-      this.logger.info('🔒 PERMISSION', `Approval result for ${toolName}: ${approved}`, `ID: ${id.slice(0, 8)}`);
+      const approved = await this.requestApproval(channel, toolName, toolInput, id, signal);
 
       if (approved) {
-        this.logger.info('🔒 PERMISSION', `Approved: ${toolName}`);
         return {
-          continue: true,
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
             permissionDecision: 'allow'
           }
         };
       } else {
-        this.logger.warn('🔒 PERMISSION', `Denied: ${toolName}`);
         return {
-          continue: false,
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
             permissionDecision: 'deny',
-            permissionDecisionReason: 'User denied permission for this operation'
+            permissionDecisionReason: 'The user denied permission for this operation (or the request timed out). Do not retry it; ask the user how to proceed.'
           }
         };
       }
@@ -102,7 +92,8 @@ export class PermissionHook {
     channel: TextChannel,
     toolName: string,
     toolInput: unknown,
-    toolUseId: string
+    toolUseId: string,
+    signal?: AbortSignal
   ): Promise<boolean> {
     // Format tool input for display
     let inputDisplay: string;
@@ -123,7 +114,9 @@ export class PermissionHook {
       })
       .setColor(0xffa500)
       .setFooter({
-        text: `Respond within ${this.config.permissionTimeoutMs / 1000} seconds`,
+        text: this.config.allowedUsers.length > 0
+          ? `Respond within ${this.config.permissionTimeoutMs / 1000} seconds (authorized users only)`
+          : `Respond within ${this.config.permissionTimeoutMs / 1000} seconds`,
       })
       .setTimestamp();
 
@@ -170,14 +163,17 @@ export class PermissionHook {
         toolInput,
         discordMessageId: discordMsg.id,
         channelId: channel.id,
-        resolve: (approved: boolean) => {
+        resolve: (approved: boolean, byUserId?: string, cancelledText?: string) => {
           clearTimeout(timeout);
           this.pendingApprovals.delete(toolUseId);
 
+          const decision = cancelledText ?? (approved ? "Approved" : "Denied");
+          this.logger.info('🔒 PERMISSION', `${decision}: ${toolName}`, byUserId ? `by ${byUserId}` : undefined);
+
           // Update message to show decision
           const resultEmbed = EmbedBuilder.from(embed)
-            .setColor(approved ? 0x00ff00 : 0xff0000)
-            .setFooter({ text: approved ? "Approved" : "Denied" });
+            .setColor(cancelledText ? 0x808080 : approved ? 0x00ff00 : 0xff0000)
+            .setFooter({ text: byUserId ? `${decision} by user ${byUserId}` : decision });
 
           discordMsg
             .edit({ embeds: [resultEmbed], components: [] })
@@ -188,6 +184,15 @@ export class PermissionHook {
         timeout,
       });
     });
+
+    // If the query is aborted (/clear, /rewind), stop waiting
+    const onAbort = () =>
+      this.pendingApprovals.get(toolUseId)?.resolve(false, undefined, "Cancelled — query aborted");
+    if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
 
     // Add fallback reactions (fire-and-forget — buttons are primary)
     discordMsg.react("\u2705").catch(() => {});
@@ -212,23 +217,36 @@ export class PermissionHook {
     if (!pending) {
       await interaction.reply({
         content: "This permission request has expired.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (!isUserAllowed(this.config, interaction.user.id)) {
+      this.logger.warn('🔒 PERMISSION', `Ignored ${action} from unauthorized user`, interaction.user.id);
+      await interaction.reply({
+        content: "You're not authorized to approve or deny tool requests.",
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
     await interaction.deferUpdate();
-    pending.resolve(action === "approve");
+    pending.resolve(action === "approve", interaction.user.id);
   }
 
   handleReaction(messageId: string, emoji: string, userId: string): void {
+    if (!isUserAllowed(this.config, userId)) {
+      return;
+    }
+
     // Find pending approval by message ID
     for (const pending of this.pendingApprovals.values()) {
       if (pending.discordMessageId === messageId) {
-        if (emoji === "\u2705" || emoji === "✅") {
-          pending.resolve(true);
-        } else if (emoji === "\u274C" || emoji === "❌") {
-          pending.resolve(false);
+        if (emoji === "\u2705") {
+          pending.resolve(true, userId);
+        } else if (emoji === "\u274C") {
+          pending.resolve(false, userId);
         }
         break;
       }
@@ -236,33 +254,9 @@ export class PermissionHook {
   }
 
   cancelPendingApprovals(channelId: string): void {
-    for (const [toolUseId, pending] of this.pendingApprovals) {
+    for (const pending of [...this.pendingApprovals.values()]) {
       if (pending.channelId !== channelId) continue;
-
-      clearTimeout(pending.timeout);
-      this.pendingApprovals.delete(toolUseId);
-
-      // Update Discord message to show cancelled
-      const channel = this.getChannel(channelId);
-      if (channel) {
-        channel.messages
-          .fetch(pending.discordMessageId)
-          .then((msg) => {
-            const cancelledEmbed = EmbedBuilder.from(msg.embeds[0])
-              .setColor(0x808080)
-              .setFooter({ text: "Cancelled — query finished" });
-            msg.edit({ embeds: [cancelledEmbed], components: [] }).catch(() => {});
-          })
-          .catch(() => {});
-      }
-
-      pending.resolve(false);
-
-      this.logger.debug(
-        "🔒 PERMISSION",
-        `Cancelled pending approval for ${pending.toolName}`,
-        `ID: ${toolUseId.slice(0, 8)}`
-      );
+      pending.resolve(false, undefined, "Cancelled — query finished");
     }
   }
 }

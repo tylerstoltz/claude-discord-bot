@@ -7,6 +7,9 @@ export interface BotConfig {
   monitorMentions: boolean;
   monitorAllMessages: boolean;
   allowedChannels: string[];
+  // Discord user IDs allowed to talk to the bot, run slash commands, and approve
+  // dangerous tools. Empty = anyone (not recommended; a warning is logged at startup).
+  allowedUsers: string[];
   maxMessageLength: number;
   model: "sonnet" | "opus" | "haiku";
   enableChrome: boolean;
@@ -14,11 +17,9 @@ export interface BotConfig {
   dangerousTools: string[];
   updateIntervalMs: number;
   sessionPersistPath: string;
-  randomMessagesEnabled: boolean;
-  randomMessageInterval: number;
-  randomMessageChannels: string[];
-  randomMessagePrompt: string;
   permissionTimeoutMs: number;
+  // Messages that arrive while a channel is busy are queued (⏳) up to this many.
+  maxQueuedMessages: number;
 
   // Logging configuration
   logLevel: LogLevel;
@@ -41,14 +42,18 @@ export interface BotConfig {
     autoUpload: boolean;
     maxFileSize: number;
     allowedExtensions: string[];
+    // Directories (relative to the bot's cwd, or absolute) that files may be
+    // uploaded from. Empty = anywhere. Bot secrets are always blocked.
+    allowedDirs: string[];
   };
 }
 
-const defaultConfig: BotConfig = {
+export const defaultConfig: BotConfig = {
   discordToken: "",
   monitorMentions: true,
   monitorAllMessages: false,
   allowedChannels: [],
+  allowedUsers: [],
   maxMessageLength: 2000,
   model: "sonnet",
   enableChrome: false,
@@ -56,11 +61,8 @@ const defaultConfig: BotConfig = {
   dangerousTools: ["Bash", "Write", "Edit", "MultiEdit"],
   updateIntervalMs: 3000,
   sessionPersistPath: "./data/sessions.json",
-  randomMessagesEnabled: false,
-  randomMessageInterval: 60,
-  randomMessageChannels: [],
-  randomMessagePrompt: "Share something interesting or helpful.",
   permissionTimeoutMs: 60000,
+  maxQueuedMessages: 5,
 
   // Logging defaults
   logLevel: "info",
@@ -79,9 +81,20 @@ const defaultConfig: BotConfig = {
     enabled: true,
     autoUpload: true,
     maxFileSize: 25 * 1024 * 1024, // 25 MB (Discord free tier limit)
-    allowedExtensions: [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm"]
+    allowedExtensions: [".txt", ".md", ".json", ".js", ".ts", ".py", ".csv", ".log", ".svg", ".html", ".xml", ".yml", ".yaml", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm"],
+    allowedDirs: ["./playground"]
   }
 };
+
+/** Merge user config over defaults. Nested sections are merged one level deep. */
+export function mergeConfig(userConfig: Partial<BotConfig>): BotConfig {
+  return {
+    ...defaultConfig,
+    ...userConfig,
+    attachments: { ...defaultConfig.attachments, ...userConfig.attachments },
+    fileUpload: { ...defaultConfig.fileUpload, ...userConfig.fileUpload },
+  };
+}
 
 export function loadConfig(configPath?: string): BotConfig {
   const path = configPath || process.env.BOT_CONFIG_PATH || "./config.json";
@@ -95,8 +108,7 @@ export function loadConfig(configPath?: string): BotConfig {
 
   try {
     const fileContent = readFileSync(resolvedPath, "utf-8");
-    const userConfig = JSON.parse(fileContent);
-    const config = { ...defaultConfig, ...userConfig };
+    const config = mergeConfig(JSON.parse(fileContent));
 
     if (!config.discordToken) {
       console.error("Discord token is required in config.json");
@@ -110,6 +122,15 @@ export function loadConfig(configPath?: string): BotConfig {
   }
 }
 
-export function isDangerousTool(toolName: string, config: BotConfig): boolean {
-  return config.dangerousTools.includes(toolName);
+export function isUserAllowed(config: BotConfig, userId: string): boolean {
+  return config.allowedUsers.length === 0 || config.allowedUsers.includes(userId);
+}
+
+/** A thread counts as allowed when its parent channel is allowed. */
+export function isChannelAllowed(config: BotConfig, channelId: string, parentId?: string | null): boolean {
+  if (config.allowedChannels.length === 0) return true;
+  return (
+    config.allowedChannels.includes(channelId) ||
+    (!!parentId && config.allowedChannels.includes(parentId))
+  );
 }

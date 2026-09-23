@@ -1,21 +1,59 @@
 import { query, AbortError } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  McpSdkServerConfigWithInstance,
+  Options,
+  SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 import type { BotConfig } from "../config.js";
 import type { PermissionHook } from "./permission-hook.js";
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
-import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
+import type { Logger } from "../logging/logger.js";
 
 export { AbortError };
 
-export interface QueryCallbacks {
-  onSessionInit?: (sessionId: string) => void;
-  onToolUse?: (toolName: string, toolInput: unknown) => void;
-  onText?: (text: string) => void;
-  onResult?: (success: boolean, cost?: number) => void;
+/** User message content (text and/or image blocks) as accepted by the SDK. */
+export type UserMessageParam = SDKUserMessage["message"];
+
+export interface QueryResult {
+  success: boolean;
+  subtype: string;
+  costUsd?: number;
+  errors: string[];
 }
 
-// Load CLAUDE.md content at startup to provide context to Claude subprocess
+export interface QueryHandlers {
+  onSessionInit?: (sessionId: string) => void;
+  onText?: (text: string) => void;
+  onToolUse?: (toolName: string, toolInput: unknown, toolUseId: string) => void;
+  onToolResult?: (toolUseId: string, isError: boolean) => void;
+  onCompact?: (preTokens: number, postTokens?: number) => void;
+  onResult?: (result: QueryResult) => void;
+}
+
+export interface QueryRequest {
+  // A string is sent as a bare prompt (used for SDK slash commands like /compact,
+  // without MCP servers or hooks). A message param is sent via streaming input.
+  prompt: string | UserMessageParam;
+  resume?: string;
+  resumeAt?: string;
+  abortController?: AbortController;
+}
+
+export interface QueryOutcome {
+  // UUID of the last main-chain transcript entry seen (the turn's rewind point)
+  lastEntryUuid: string | null;
+  aborted: boolean;
+}
+
+const DISCORD_MCP_TOOLS = [
+  "mcp__discord__discord_fetch_messages",
+  "mcp__discord__discord_list_channels",
+  "mcp__discord__discord_server_info",
+  "mcp__discord__discord_search_messages",
+];
+
+// Load CLAUDE.md content to provide context to Claude subprocess
 function loadClaudeMdContext(): string | undefined {
   const claudeMdPath = join(process.cwd(), "CLAUDE.md");
   if (existsSync(claudeMdPath)) {
@@ -133,33 +171,31 @@ function loadPlaygroundSkillIndex(): string | undefined {
   ].join("\n");
 }
 
-// Load CLAUDE.local.md for deployment-specific context (gitignored)
-function loadLocalContext(): string | undefined {
-  const localMdPath = join(process.cwd(), "CLAUDE.local.md");
-  if (existsSync(localMdPath)) {
-    try {
-      return readFileSync(localMdPath, "utf-8");
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
+// CLAUDE.local.md (gitignored) holds deployment-specific context such as credentials.
+// It is deliberately NOT injected into the system prompt, where anyone chatting with the
+// bot could ask for it verbatim. Claude is told it exists and reads it on demand.
+function loadLocalContextPointer(): string | undefined {
+  if (!existsSync(join(process.cwd(), "CLAUDE.local.md"))) return undefined;
+  return [
+    "## Deployment-Specific Context",
+    "",
+    "`CLAUDE.local.md` in the working directory holds deployment-specific context",
+    "(e.g. GitHub identity and credentials). Read it only when a task needs it.",
+    "Never post its contents, or any token, key, or password, into Discord.",
+  ].join("\n");
 }
 
-const CLAUDE_MD_CONTEXT = loadClaudeMdContext();
-const LOCAL_CONTEXT = loadLocalContext();
-let SKILL_INDEX = loadPlaygroundSkillIndex();
-let SYSTEM_PROMPT_APPEND = [CLAUDE_MD_CONTEXT, LOCAL_CONTEXT, SKILL_INDEX]
-  .filter(Boolean)
-  .join("\n\n") || undefined;
-
-/** Re-scan playground skills and local context. Call on /clear so new skills appear in next session. */
-export function refreshSystemPrompt(): void {
-  const localCtx = loadLocalContext();
-  SKILL_INDEX = loadPlaygroundSkillIndex();
-  SYSTEM_PROMPT_APPEND = [CLAUDE_MD_CONTEXT, localCtx, SKILL_INDEX]
+function buildSystemPromptAppend(): string | undefined {
+  return [loadClaudeMdContext(), loadLocalContextPointer(), loadPlaygroundSkillIndex()]
     .filter(Boolean)
     .join("\n\n") || undefined;
+}
+
+let SYSTEM_PROMPT_APPEND = buildSystemPromptAppend();
+
+/** Re-read CLAUDE.md and re-scan playground skills. Called on /clear so changes apply to the next session. */
+export function refreshSystemPrompt(): void {
+  SYSTEM_PROMPT_APPEND = buildSystemPromptAppend();
 }
 
 export class AIClient {
@@ -167,222 +203,58 @@ export class AIClient {
     private config: BotConfig,
     private permissionHook: PermissionHook | null,
     private channelId: string,
+    private logger: Logger,
     private discordMcpServer: McpSdkServerConfigWithInstance | null = null
   ) {}
 
-  async *queryStream(
-    prompt: string,
-    resumeSessionId?: string,
-    abortController?: AbortController
-  ): AsyncIterable<{
-    type: string;
-    sessionId?: string;
-    text?: string;
-    toolName?: string;
-    toolInput?: unknown;
-    success?: boolean;
-    cost?: number;
-  }> {
-    const options: any = {
+  private buildOptions(request: QueryRequest, withTools: boolean): Options {
+    const options: Options = {
       maxTurns: 100,
       model: this.config.model,
-      allowedTools: this.config.allowedTools,
+      allowedTools: [...this.config.allowedTools],
       cwd: process.cwd(),
+      // Isolation mode: don't pick up ~/.claude or .claude/ settings from the host.
+      // CLAUDE.md is injected explicitly via systemPrompt.append below.
+      settingSources: [],
       extraArgs: this.config.enableChrome ? { chrome: null } : {},
     };
 
     // Inject CLAUDE.md context + skill index so Claude subprocess has project awareness
     if (SYSTEM_PROMPT_APPEND) {
       options.systemPrompt = {
-        type: 'preset',
-        preset: 'claude_code',
-        append: SYSTEM_PROMPT_APPEND
+        type: "preset",
+        preset: "claude_code",
+        append: SYSTEM_PROMPT_APPEND,
       };
     }
 
-    // Resume session if we have a session ID
-    if (resumeSessionId) {
-      options.resume = resumeSessionId;
+    if (request.resume) {
+      options.resume = request.resume;
+      if (request.resumeAt) {
+        options.resumeSessionAt = request.resumeAt;
+      }
     }
 
-    // Pass abort controller for cancellation support
-    if (abortController) {
-      options.abortController = abortController;
+    if (request.abortController) {
+      options.abortController = request.abortController;
     }
 
-    // Add Discord MCP server for channel/message query tools
+    if (!withTools) {
+      return options;
+    }
+
+    // Discord MCP server for channel/message query tools (needs streaming input)
     if (this.discordMcpServer) {
       options.mcpServers = { discord: this.discordMcpServer };
-      options.allowedTools = [
-        ...(options.allowedTools || []),
-        "mcp__discord__discord_fetch_messages",
-        "mcp__discord__discord_list_channels",
-        "mcp__discord__discord_server_info",
-        "mcp__discord__discord_search_messages",
-      ];
+      options.allowedTools!.push(...DISCORD_MCP_TOOLS);
     }
 
-    // Add permission hooks if configured
+    // Permission hook for dangerous tools
     if (this.permissionHook && this.config.dangerousTools.length > 0) {
-      const matcher = this.config.dangerousTools.join("|");
       options.hooks = {
         PreToolUse: [
           {
-            matcher,
-            hooks: [
-              this.permissionHook.createHookHandler(this.channelId),
-            ],
-            // SDK timeout in seconds (must be LONGER than Discord timeout so hook can respond)
-            timeout: Math.ceil(this.config.permissionTimeoutMs / 1000) + 5,
-          },
-        ],
-      };
-    }
-
-    try {
-      const q = query({ prompt, options });
-
-      for await (const message of q) {
-        // Handle different message types
-        if (message.type === "system" && (message as any).subtype === "init") {
-          yield {
-            type: "session_init",
-            sessionId: (message as any).session_id,
-          };
-        } else if (message.type === "assistant") {
-          const content = (message as any).message?.content;
-
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === "text") {
-                yield { type: "text", text: block.text };
-              } else if (block.type === "tool_use") {
-                yield {
-                  type: "tool_use",
-                  toolName: block.name,
-                  toolInput: block.input,
-                };
-              }
-            }
-          } else if (typeof content === "string") {
-            yield { type: "text", text: content };
-          }
-        } else if (message.type === "result") {
-          yield {
-            type: "result",
-            success: (message as any).subtype === "success",
-            cost: (message as any).total_cost_usd,
-          };
-        }
-      }
-    } catch (error) {
-      if (error instanceof AbortError) {
-        return; // Expected cancellation, exit silently
-      }
-      console.error("[AI] Query error:", error);
-      throw error;
-    }
-  }
-
-  async queryWithUpdater(
-    prompt: string,
-    updater: ChunkedUpdater,
-    resumeSessionId?: string,
-    callbacks?: QueryCallbacks,
-    abortController?: AbortController
-  ): Promise<string | null> {
-    let newSessionId: string | null = null;
-
-    for await (const event of this.queryStream(prompt, resumeSessionId, abortController)) {
-      switch (event.type) {
-        case "session_init":
-          newSessionId = event.sessionId || null;
-          callbacks?.onSessionInit?.(event.sessionId!);
-          break;
-
-        case "text":
-          if (event.text) {
-            updater.appendContent(event.text);
-            callbacks?.onText?.(event.text);
-          }
-          break;
-
-        case "tool_use":
-          updater.onToolUse(event.toolName!, event.toolInput);
-          callbacks?.onToolUse?.(event.toolName!, event.toolInput);
-          break;
-
-        case "result":
-          callbacks?.onResult?.(event.success!, event.cost);
-          break;
-      }
-    }
-
-    return newSessionId;
-  }
-
-  async queryWithMessage(
-    userMessage: any, // MessageParam from Anthropic SDK
-    updater: ChunkedUpdater,
-    resumeSessionId?: string,
-    callbacks?: QueryCallbacks,
-    abortController?: AbortController
-  ): Promise<void> {
-    // Create async iterable that yields the SDK user message
-    const messageStream = async function* () {
-      yield {
-        type: 'user' as const,
-        message: userMessage,
-        parent_tool_use_id: null,
-        session_id: resumeSessionId || ''
-      };
-    };
-
-    const options: any = {
-      maxTurns: 100,
-      model: this.config.model,
-      allowedTools: this.config.allowedTools,
-      cwd: process.cwd(),
-      extraArgs: this.config.enableChrome ? { chrome: null } : {},
-    };
-
-    // Inject CLAUDE.md context + skill index so Claude subprocess has project awareness
-    if (SYSTEM_PROMPT_APPEND) {
-      options.systemPrompt = {
-        type: 'preset',
-        preset: 'claude_code',
-        append: SYSTEM_PROMPT_APPEND
-      };
-    }
-
-    if (resumeSessionId) {
-      options.resume = resumeSessionId;
-    }
-
-    // Pass abort controller for cancellation support
-    if (abortController) {
-      options.abortController = abortController;
-    }
-
-    // Add Discord MCP server for channel/message query tools
-    if (this.discordMcpServer) {
-      options.mcpServers = { discord: this.discordMcpServer };
-      options.allowedTools = [
-        ...(options.allowedTools || []),
-        "mcp__discord__discord_fetch_messages",
-        "mcp__discord__discord_list_channels",
-        "mcp__discord__discord_server_info",
-        "mcp__discord__discord_search_messages",
-      ];
-    }
-
-    // Add permission hooks if configured
-    if (this.permissionHook && this.config.dangerousTools.length > 0) {
-      const matcher = this.config.dangerousTools.join("|");
-      options.hooks = {
-        PreToolUse: [
-          {
-            matcher,
+            matcher: `^(${this.config.dangerousTools.join("|")})$`,
             hooks: [this.permissionHook.createHookHandler(this.channelId)],
             // SDK timeout in seconds (must be LONGER than Discord timeout so hook can respond)
             timeout: Math.ceil(this.config.permissionTimeoutMs / 1000) + 5,
@@ -391,45 +263,83 @@ export class AIClient {
       };
     }
 
-    try {
-      const q = query({
-        prompt: messageStream(),
-        options
-      });
+    return options;
+  }
 
-      // Stream events
-      for await (const message of q) {
-        if (message.type === "system" && (message as any).subtype === "init") {
-          callbacks?.onSessionInit?.((message as any).session_id);
-        } else if (message.type === "assistant") {
-          const content = (message as any).message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
+  async run(request: QueryRequest, handlers: QueryHandlers = {}): Promise<QueryOutcome> {
+    const isCommand = typeof request.prompt === "string";
+    const options = this.buildOptions(request, !isCommand);
+
+    const prompt = isCommand
+      ? (request.prompt as string)
+      : (async function* (message: UserMessageParam): AsyncIterable<SDKUserMessage> {
+          yield { type: "user", message, parent_tool_use_id: null };
+        })(request.prompt as UserMessageParam);
+
+    const outcome: QueryOutcome = { lastEntryUuid: null, aborted: false };
+
+    try {
+      for await (const message of query({ prompt, options })) {
+        switch (message.type) {
+          case "system":
+            if (message.subtype === "init") {
+              handlers.onSessionInit?.(message.session_id);
+            } else if (message.subtype === "compact_boundary") {
+              handlers.onCompact?.(
+                message.compact_metadata.pre_tokens,
+                message.compact_metadata.post_tokens
+              );
+            }
+            break;
+
+          case "assistant": {
+            if (message.parent_tool_use_id === null) {
+              outcome.lastEntryUuid = message.uuid;
+            }
+            for (const block of message.message.content) {
               if (block.type === "text") {
-                updater.appendContent(block.text);
-                callbacks?.onText?.(block.text);
+                handlers.onText?.(block.text);
               } else if (block.type === "tool_use") {
-                updater.onToolUse(block.name, block.input);
-                callbacks?.onToolUse?.(block.name, block.input);
+                handlers.onToolUse?.(block.name, block.input, block.id);
               }
             }
-          } else if (typeof content === "string") {
-            updater.appendContent(content);
-            callbacks?.onText?.(content);
+            break;
           }
-        } else if (message.type === "result") {
-          callbacks?.onResult?.(
-            (message as any).subtype === "success",
-            (message as any).total_cost_usd
-          );
+
+          case "user": {
+            if (message.parent_tool_use_id === null && message.uuid) {
+              outcome.lastEntryUuid = message.uuid;
+            }
+            const content = message.message.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (block.type === "tool_result") {
+                  handlers.onToolResult?.(block.tool_use_id, !!block.is_error);
+                }
+              }
+            }
+            break;
+          }
+
+          case "result":
+            handlers.onResult?.({
+              success: message.subtype === "success" && !message.is_error,
+              subtype: message.subtype,
+              costUsd: message.total_cost_usd,
+              errors: "errors" in message ? message.errors : [],
+            });
+            break;
         }
       }
     } catch (error) {
-      if (error instanceof AbortError) {
-        return; // Expected cancellation, exit silently
+      if (error instanceof AbortError || request.abortController?.signal.aborted) {
+        outcome.aborted = true;
+        return outcome; // Expected cancellation (e.g. /clear or /rewind mid-query)
       }
-      console.error("[AI] Query error:", error);
+      this.logger.error("🤖 AI", "Query error", (error as Error).message);
       throw error;
     }
+
+    return outcome;
   }
 }

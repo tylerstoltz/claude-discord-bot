@@ -1,7 +1,8 @@
-import { Client, ChannelType, TextChannel, type Guild } from "discord.js";
+import { Client, ChannelType, type Guild, type GuildTextBasedChannel } from "discord.js";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { isChannelAllowed, type BotConfig } from "../config.js";
 
 function formatTimestamp(date: Date): string {
   return date.toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
@@ -15,18 +16,32 @@ function channelTypeName(type: ChannelType): string {
     case ChannelType.GuildAnnouncement: return "announcement";
     case ChannelType.GuildForum: return "forum";
     case ChannelType.GuildStageVoice: return "stage";
+    case ChannelType.PublicThread:
+    case ChannelType.PrivateThread:
+    case ChannelType.AnnouncementThread: return "thread";
     default: return "other";
   }
 }
 
-function resolveGuild(client: Client, guildId?: string): Guild | undefined {
-  if (guildId) {
-    return client.guilds.cache.get(guildId);
+export function createDiscordMcpServer(client: Client, config: BotConfig): McpSdkServerConfigWithInstance {
+  function resolveGuild(guildId?: string): Guild | undefined {
+    const id = guildId || config.guildId;
+    return id ? client.guilds.cache.get(id) : client.guilds.cache.first();
   }
-  return client.guilds.cache.first();
-}
 
-export function createDiscordMcpServer(client: Client): McpSdkServerConfigWithInstance {
+  /** Fetch a guild text channel (or thread) that the bot is configured to see. */
+  async function resolveTextChannel(channelId: string): Promise<GuildTextBasedChannel | string> {
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel || !channel.isTextBased() || channel.isDMBased()) {
+      return `Error: Channel ${channelId} not found or is not a server text channel.`;
+    }
+    const parentId = channel.isThread() ? channel.parentId : null;
+    if (!isChannelAllowed(config, channel.id, parentId)) {
+      return `Error: Channel ${channelId} is outside this bot's allowed channels.`;
+    }
+    return channel;
+  }
+
   const fetchMessages = tool(
     "discord_fetch_messages",
     "Fetch recent messages from a Discord channel. Returns messages in reverse chronological order (newest first). Use before_message_id for pagination to fetch older messages.",
@@ -37,9 +52,9 @@ export function createDiscordMcpServer(client: Client): McpSdkServerConfigWithIn
     },
     async (args) => {
       try {
-        const channel = await client.channels.fetch(args.channel_id);
-        if (!channel || !(channel instanceof TextChannel)) {
-          return { content: [{ type: "text", text: `Error: Channel ${args.channel_id} not found or is not a text channel.` }], isError: true };
+        const channel = await resolveTextChannel(args.channel_id);
+        if (typeof channel === "string") {
+          return { content: [{ type: "text", text: channel }], isError: true };
         }
 
         const fetchOptions: { limit: number; before?: string } = {
@@ -80,7 +95,7 @@ export function createDiscordMcpServer(client: Client): McpSdkServerConfigWithIn
     },
     async (args) => {
       try {
-        const guild = resolveGuild(client, args.guild_id);
+        const guild = resolveGuild(args.guild_id);
         if (!guild) {
           return { content: [{ type: "text", text: "Error: No guild found. Provide a valid guild_id." }], isError: true };
         }
@@ -88,6 +103,7 @@ export function createDiscordMcpServer(client: Client): McpSdkServerConfigWithIn
         const channels = await guild.channels.fetch();
         const sorted = [...channels.values()]
           .filter((c): c is NonNullable<typeof c> => c !== null)
+          .filter((c) => c.type === ChannelType.GuildCategory || isChannelAllowed(config, c.id))
           .sort((a, b) => (a.rawPosition ?? 0) - (b.rawPosition ?? 0));
 
         const lines = sorted.map((c) => {
@@ -111,7 +127,7 @@ export function createDiscordMcpServer(client: Client): McpSdkServerConfigWithIn
     },
     async (args) => {
       try {
-        const guild = resolveGuild(client, args.guild_id);
+        const guild = resolveGuild(args.guild_id);
         if (!guild) {
           return { content: [{ type: "text", text: "Error: No guild found. Provide a valid guild_id." }], isError: true };
         }
@@ -150,15 +166,16 @@ export function createDiscordMcpServer(client: Client): McpSdkServerConfigWithIn
       channel_id: z.string().describe("The Discord channel ID to search in"),
       query: z.string().describe("Search keyword or phrase (case-insensitive)"),
       limit: z.number().min(1).max(100).optional().describe("Number of messages to scan (default 50, max 100)"),
+      before_message_id: z.string().optional().describe("Scan messages before this message ID (for paginating further back)"),
     },
     async (args) => {
       try {
-        const channel = await client.channels.fetch(args.channel_id);
-        if (!channel || !(channel instanceof TextChannel)) {
-          return { content: [{ type: "text", text: `Error: Channel ${args.channel_id} not found or is not a text channel.` }], isError: true };
+        const channel = await resolveTextChannel(args.channel_id);
+        if (typeof channel === "string") {
+          return { content: [{ type: "text", text: channel }], isError: true };
         }
 
-        const messages = await channel.messages.fetch({ limit: args.limit ?? 50 });
+        const messages = await channel.messages.fetch({ limit: args.limit ?? 50, before: args.before_message_id });
         const queryLower = args.query.toLowerCase();
         const matches = [...messages.values()]
           .filter((m) => m.content.toLowerCase().includes(queryLower))
@@ -174,7 +191,8 @@ export function createDiscordMcpServer(client: Client): McpSdkServerConfigWithIn
           return `[${time}] ${author}: ${m.content}`;
         });
 
-        const header = `#${channel.name} — ${matches.length} match(es) for "${args.query}" (searched ${messages.size} messages):\n\n`;
+        const oldest = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp)[0];
+        const header = `#${channel.name} — ${matches.length} match(es) for "${args.query}" (searched ${messages.size} messages; oldest scanned ID: ${oldest?.id}):\n\n`;
         return { content: [{ type: "text", text: header + lines.join("\n") }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error searching messages: ${(err as Error).message}` }], isError: true };

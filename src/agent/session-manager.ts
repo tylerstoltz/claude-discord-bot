@@ -1,12 +1,12 @@
 import type { BotConfig } from "../config.js";
 import { SessionPersistence } from "../persistence/session-store.js";
-import { AIClient } from "./ai-client.js";
+import { AIClient, type QueryHandlers, type QueryResult, type UserMessageParam } from "./ai-client.js";
 import type { PermissionHook } from "./permission-hook.js";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
 import type { Logger } from "../logging/logger.js";
 import type { ProcessedImage } from "../types/attachment-types.js";
-import { unlink } from "fs/promises";
+import { readdir, rm, unlink } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -16,6 +16,24 @@ export interface ManagedSession {
   isProcessing: boolean;
   lastActivity: Date;
   abortController: AbortController | null;
+  // Tail of the per-channel work queue; each task chains onto it
+  queueTail: Promise<void>;
+  // Tasks waiting behind the running one
+  queued: number;
+  // The running task, so /clear and /rewind can wait for it to settle after aborting
+  current: Promise<unknown> | null;
+  // Held by /clear and /rewind while they abort and change the session; queued tasks wait on it
+  barrier: Promise<void>;
+}
+
+/** Directory Claude Code stores transcripts in: ~/.claude/projects (or $CLAUDE_CONFIG_DIR/projects). */
+function projectsDir(): string {
+  return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+}
+
+/** Claude Code names a project's transcript dir after its cwd with every non-alphanumeric char replaced by '-'. */
+export function projectDirName(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
 export class SessionManager {
@@ -25,7 +43,7 @@ export class SessionManager {
   private discordMcpServer: McpSdkServerConfigWithInstance | null = null;
 
   constructor(private config: BotConfig, private logger: Logger) {
-    this.sessionStore = new SessionPersistence(config.sessionPersistPath);
+    this.sessionStore = new SessionPersistence(config.sessionPersistPath, logger);
   }
 
   setPermissionHook(hook: PermissionHook): void {
@@ -41,15 +59,8 @@ export class SessionManager {
 
     // Pre-populate active sessions from persisted data
     for (const channelId of this.sessionStore.getAllChannels()) {
-      const sessionId = this.sessionStore.getSessionId(channelId);
-      if (sessionId) {
-        this.activeSessions.set(channelId, {
-          channelId,
-          sdkSessionId: sessionId,
-          isProcessing: false,
-          lastActivity: new Date(),
-          abortController: null,
-        });
+      if (this.sessionStore.getSessionId(channelId)) {
+        this.getOrCreateSession(channelId);
         this.logger.debug('💾 SESSION', `Loaded persisted session for channel ${channelId}`);
       }
     }
@@ -63,7 +74,15 @@ export class SessionManager {
     return this.activeSessions.get(channelId);
   }
 
-  async getOrCreateSession(channelId: string): Promise<ManagedSession> {
+  getTurnCount(channelId: string): number {
+    return this.sessionStore.getTurnCount(channelId);
+  }
+
+  hasPendingRewind(channelId: string): boolean {
+    return !!this.sessionStore.getResumeAt(channelId);
+  }
+
+  getOrCreateSession(channelId: string): ManagedSession {
     let session = this.activeSessions.get(channelId);
 
     if (!session) {
@@ -76,6 +95,10 @@ export class SessionManager {
         isProcessing: false,
         lastActivity: new Date(),
         abortController: null,
+        queueTail: Promise.resolve(),
+        queued: 0,
+        current: null,
+        barrier: Promise.resolve(),
       };
 
       this.activeSessions.set(channelId, session);
@@ -90,207 +113,110 @@ export class SessionManager {
     return session;
   }
 
-  async queryAndStream(
-    channelId: string,
-    prompt: string,
-    updater: ChunkedUpdater
-  ): Promise<void> {
-    const session = await this.getOrCreateSession(channelId);
-    session.lastActivity = new Date();
+  /**
+   * Run `task` after every earlier task for this channel has finished.
+   * Tasks run one at a time per channel; different channels run concurrently.
+   */
+  async runExclusive<T>(channelId: string, task: () => Promise<T>): Promise<T> {
+    const session = this.getOrCreateSession(channelId);
+    const previous = session.queueTail;
+    let release!: () => void;
+    session.queueTail = new Promise<void>((resolve) => (release = resolve));
 
-    const abortController = new AbortController();
-    session.abortController = abortController;
-
-    const aiClient = new AIClient(this.config, this.permissionHook, channelId, this.discordMcpServer);
-
+    session.queued++;
     try {
-      const newSessionId = await aiClient.queryWithUpdater(
-        prompt,
-        updater,
-        session.sdkSessionId || undefined,
-        {
-          onSessionInit: (sessionId) => {
-            this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
-            session.sdkSessionId = sessionId;
-            this.sessionStore.setSessionId(channelId, sessionId);
-            // Track in message history for rewind
-            this.sessionStore.pushMessageHistory(channelId, sessionId);
-            // Persist immediately
-            this.sessionStore.save().catch((err) =>
-              this.logger.error('💾 SESSION', 'Failed to persist', err.message)
-            );
-          },
-        },
-        abortController
-      );
-
-      // Update session ID if we got a new one
-      if (newSessionId && newSessionId !== session.sdkSessionId) {
-        session.sdkSessionId = newSessionId;
-        this.sessionStore.setSessionId(channelId, newSessionId);
-        // Track in message history for rewind
-        this.sessionStore.pushMessageHistory(channelId, newSessionId);
-        await this.sessionStore.save();
+      await previous;
+      // Let any /clear or /rewind in progress finish first (barriers can be re-armed while we wait)
+      for (let barrier = session.barrier; ; barrier = session.barrier) {
+        await barrier;
+        if (barrier === session.barrier) break;
       }
-
-      this.sessionStore.updateActivity(channelId);
     } finally {
-      // Clear abort controller only if it's still the one we created
-      if (session.abortController === abortController) {
-        session.abortController = null;
-      }
-      this.permissionHook?.cancelPendingApprovals(channelId);
-    }
-  }
-
-  async clearSession(channelId: string): Promise<void> {
-    const session = this.activeSessions.get(channelId);
-
-    // Abort any in-flight query before tearing down the session
-    if (session?.abortController) {
-      session.abortController.abort();
-      session.abortController = null;
+      session.queued--;
     }
 
-    const sessionId = session?.sdkSessionId;
-
-    // Delete SDK session file before clearing references
-    if (sessionId) {
-      await this.deleteSdkSessionFile(sessionId);
-    }
-
-    if (session) {
-      session.sdkSessionId = null;
-      session.isProcessing = false;
-      session.lastActivity = new Date();
-    }
-
-    this.sessionStore.clearSession(channelId);
-    await this.sessionStore.save();
-
-    this.logger.info('💾 SESSION', `Cleared session for channel ${channelId.slice(-6)}`);
-  }
-
-  private async deleteSdkSessionFile(sessionId: string): Promise<void> {
+    session.isProcessing = true;
+    const running = task();
+    session.current = running;
     try {
-      // Construct SDK session file path
-      // SDK stores sessions in ~/.claude/projects/{project-path}/{sessionId}.jsonl
-      // Project path is the cwd with slashes converted to dashes and leading slash removed
-      const projectPath = process.cwd().replace(/\//g, '-').substring(1);
-      const sessionFilePath = join(
-        homedir(),
-        '.claude',
-        'projects',
-        projectPath,
-        `${sessionId}.jsonl`
-      );
-
-      // Delete the file
-      await unlink(sessionFilePath);
-      this.logger.info('🗑️  DELETE', `Deleted SDK session file`, sessionId.slice(0, 8));
-    } catch (error) {
-      // Don't throw - file might not exist or already deleted
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.logger.warn('🗑️  DELETE', `Failed to delete session file`, (error as Error).message);
-      }
+      return await running;
+    } finally {
+      session.current = null;
+      session.isProcessing = false;
+      release();
     }
   }
 
-  async compactSession(channelId: string): Promise<{ success: boolean; messageCount: number }> {
-    const session = this.activeSessions.get(channelId);
+  /**
+   * Abort the running query (if any), wait for it to unwind, then run `change`
+   * before any queued task can start.
+   */
+  private async interrupt<T>(session: ManagedSession, change: () => Promise<T>): Promise<T> {
+    let lift!: () => void;
+    const mine = new Promise<void>((resolve) => (lift = resolve));
+    const before = session.barrier;
+    session.barrier = before.then(() => mine);
 
-    if (!session?.sdkSessionId) {
-      return { success: false, messageCount: 0 };
-    }
-
-    // Get current message count
-    const messageCount = this.sessionStore.getMessageCount(channelId);
-
-    // The SDK handles compaction automatically when context grows large
-    // This method just provides user feedback about the current session state
-    this.logger.info('💾 SESSION', `Compact info for channel ${channelId.slice(-6)}`, `${messageCount} messages`);
-
-    return { success: true, messageCount };
-  }
-
-  async rewindSession(channelId: string, count: number = 1): Promise<{ success: boolean; rewoundTo: string | null; messagesRemoved: number }> {
-    const session = this.activeSessions.get(channelId);
-
-    // Abort any in-flight query before rewinding
-    if (session?.abortController) {
-      session.abortController.abort();
+    try {
+      await before;
+      session.abortController?.abort();
       session.abortController = null;
-    }
-
-    if (!session?.sdkSessionId) {
-      return { success: false, rewoundTo: null, messagesRemoved: 0 };
-    }
-
-    const beforeCount = this.sessionStore.getMessageCount(channelId);
-
-    // Rewind the message history
-    const newSessionId = this.sessionStore.rewindMessageHistory(channelId, count);
-
-    const afterCount = this.sessionStore.getMessageCount(channelId);
-    const messagesRemoved = beforeCount - afterCount;
-
-    if (newSessionId) {
-      // Update current session to the rewound state
-      session.sdkSessionId = newSessionId;
-      this.sessionStore.setSessionId(channelId, newSessionId);
-      await this.sessionStore.save();
-
-      this.logger.info('⏪ REWIND', `Rewound channel ${channelId.slice(-6)}`, `${messagesRemoved} messages removed`);
-      return { success: true, rewoundTo: newSessionId, messagesRemoved };
-    } else {
-      // Rewound to beginning - clear the session
-      session.sdkSessionId = null;
-      this.sessionStore.clearSession(channelId);
-      await this.sessionStore.save();
-
-      this.logger.info('⏪ REWIND', `Rewound channel ${channelId.slice(-6)} to start`, `${messagesRemoved} messages removed`);
-      return { success: true, rewoundTo: null, messagesRemoved };
+      await session.current?.catch(() => {});
+      return await change();
+    } finally {
+      lift();
     }
   }
 
-  async queryAndStreamWithImages(
+  /** Send a user message (text and/or images) to Claude and stream the reply. Call inside runExclusive. */
+  async queryAndStream(
     channelId: string,
     text: string,
     images: ProcessedImage[],
     updater: ChunkedUpdater
-  ): Promise<void> {
-    const session = await this.getOrCreateSession(channelId);
+  ): Promise<{ result: QueryResult | null; aborted: boolean }> {
+    const session = this.getOrCreateSession(channelId);
     session.lastActivity = new Date();
-
-    // Build user message with text + images
-    const userMessage = this.buildUserMessage(text, images);
 
     const abortController = new AbortController();
     session.abortController = abortController;
 
-    const aiClient = new AIClient(this.config, this.permissionHook, channelId, this.discordMcpServer);
+    const aiClient = new AIClient(this.config, this.permissionHook, channelId, this.logger, this.discordMcpServer);
+    let result: QueryResult | null = null;
+
+    const handlers: QueryHandlers = {
+      onSessionInit: (sessionId) => {
+        this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
+        session.sdkSessionId = sessionId;
+        this.sessionStore.setSessionId(channelId, sessionId);
+        this.sessionStore.save().catch(() => {});
+      },
+      onText: (t) => updater.appendContent(t),
+      onToolUse: (name, input, id) => updater.onToolUse(name, input, id),
+      onToolResult: (id, isError) => updater.onToolResult(id, isError),
+      onResult: (r) => {
+        result = r;
+      },
+    };
 
     try {
-      await aiClient.queryWithMessage(
-        userMessage,
-        updater,
-        session.sdkSessionId || undefined,
+      const outcome = await aiClient.run(
         {
-          onSessionInit: (sessionId) => {
-            this.logger.debug('💾 SESSION', `Got session ID: ${sessionId.slice(0, 8)}`);
-            session.sdkSessionId = sessionId;
-            this.sessionStore.setSessionId(channelId, sessionId);
-            // Track in message history for rewind
-            this.sessionStore.pushMessageHistory(channelId, sessionId);
-            this.sessionStore.save().catch((err) =>
-              this.logger.error('💾 SESSION', 'Failed to persist', err.message)
-            );
-          },
+          prompt: this.buildUserMessage(text, images),
+          resume: session.sdkSessionId || undefined,
+          resumeAt: this.sessionStore.getResumeAt(channelId),
+          abortController,
         },
-        abortController
+        handlers
       );
 
+      // Record the turn boundary (even for aborted turns, so /rewind 1 drops a partial turn)
+      if (outcome.lastEntryUuid && session.sdkSessionId) {
+        this.sessionStore.recordTurn(channelId, outcome.lastEntryUuid);
+      }
       this.sessionStore.updateActivity(channelId);
+      await this.sessionStore.save();
+      return { result, aborted: outcome.aborted };
     } finally {
       // Clear abort controller only if it's still the one we created
       if (session.abortController === abortController) {
@@ -300,30 +226,152 @@ export class SessionManager {
     }
   }
 
-  private buildUserMessage(text: string, images: ProcessedImage[]): any {
+  /** Run the SDK's /compact on the channel's session. Call inside runExclusive. */
+  async compactSession(channelId: string): Promise<{ compacted: boolean; preTokens?: number; postTokens?: number; error?: string }> {
+    const session = this.getOrCreateSession(channelId);
+    if (!session.sdkSessionId) {
+      return { compacted: false, error: "No active session to compact." };
+    }
+
+    const abortController = new AbortController();
+    session.abortController = abortController;
+    const aiClient = new AIClient(this.config, null, channelId, this.logger);
+    let preTokens: number | undefined;
+    let postTokens: number | undefined;
+    let result: QueryResult | null = null;
+
+    try {
+      await aiClient.run(
+        {
+          prompt: "/compact",
+          resume: session.sdkSessionId,
+          resumeAt: this.sessionStore.getResumeAt(channelId),
+          abortController,
+        },
+        {
+          onCompact: (pre, post) => {
+            preTokens = pre;
+            postTokens = post;
+          },
+          onResult: (r) => {
+            result = r;
+          },
+        }
+      );
+    } finally {
+      if (session.abortController === abortController) {
+        session.abortController = null;
+      }
+    }
+
+    if (preTokens === undefined) {
+      const errors = (result as QueryResult | null)?.errors.join("; ");
+      return { compacted: false, error: errors || "The SDK did not report a compaction." };
+    }
+
+    // Pre-compaction turn UUIDs are not safe rewind points any more
+    this.sessionStore.clearTurns(channelId);
+    await this.sessionStore.save();
+    this.logger.info('💾 SESSION', `Compacted channel ${channelId.slice(-6)}`, `${preTokens} → ${postTokens ?? '?'} tokens`);
+    return { compacted: true, preTokens, postTokens };
+  }
+
+  async clearSession(channelId: string): Promise<void> {
+    const session = this.getOrCreateSession(channelId);
+
+    // Stop any in-flight query and tear down the session before queued messages run
+    await this.interrupt(session, async () => {
+      const sessionId = session.sdkSessionId ?? this.sessionStore.getSessionId(channelId);
+      if (sessionId) {
+        await this.deleteSdkSessionFiles(sessionId);
+      }
+
+      session.sdkSessionId = null;
+      session.lastActivity = new Date();
+      this.sessionStore.clearSession(channelId);
+      await this.sessionStore.save();
+    });
+
+    this.logger.info('💾 SESSION', `Cleared session for channel ${channelId.slice(-6)}`);
+  }
+
+  /** Delete the SDK transcript (<id>.jsonl) and its subagent dir (<id>/). */
+  private async deleteSdkSessionFiles(sessionId: string): Promise<void> {
+    const root = projectsDir();
+    let projectDirs = [join(root, projectDirName(process.cwd()))];
+
+    try {
+      await unlink(join(projectDirs[0], `${sessionId}.jsonl`));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.logger.warn('🗑️  DELETE', 'Failed to delete session file', (error as Error).message);
+        return;
+      }
+      // Not where expected (e.g. very long cwd gets a hashed name) — search all projects
+      try {
+        const entries = await readdir(root);
+        projectDirs = entries.map((e) => join(root, e));
+      } catch {
+        projectDirs = [];
+      }
+      let found = false;
+      for (const dir of projectDirs) {
+        try {
+          await unlink(join(dir, `${sessionId}.jsonl`));
+          projectDirs = [dir];
+          found = true;
+          break;
+        } catch {
+          // keep looking
+        }
+      }
+      if (!found) {
+        this.logger.debug('🗑️  DELETE', 'No SDK session file found', sessionId.slice(0, 8));
+        return;
+      }
+    }
+
+    await rm(join(projectDirs[0], sessionId), { recursive: true, force: true }).catch(() => {});
+    this.logger.info('🗑️  DELETE', 'Deleted SDK session file', sessionId.slice(0, 8));
+  }
+
+  async rewindSession(channelId: string, count: number = 1): Promise<{ success: boolean; removed: number; remaining: number }> {
+    const session = this.getOrCreateSession(channelId);
+
+    // Stop any in-flight query (its partial turn is recorded) and rewind before queued messages run
+    return this.interrupt(session, async () => {
+      if (!session.sdkSessionId) {
+        return { success: false, removed: 0, remaining: 0 };
+      }
+
+      const { removed, remaining } = this.sessionStore.rewind(channelId, count);
+
+      if (removed > 0 && remaining === 0) {
+        // Rewound past the first turn — start a fresh conversation
+        session.sdkSessionId = null;
+        this.sessionStore.clearSession(channelId);
+      }
+      await this.sessionStore.save();
+
+      this.logger.info('⏪ REWIND', `Rewound channel ${channelId.slice(-6)}`, `${removed} turn(s) removed, ${remaining} remain`);
+      return { success: true, removed, remaining };
+    });
+  }
+
+  private buildUserMessage(text: string, images: ProcessedImage[]): UserMessageParam {
     if (images.length === 0) {
-      // Simple text-only message
-      return {
-        role: 'user',
-        content: text
-      };
+      return { role: 'user', content: text };
     }
 
-    // Message with text + images - use content blocks
-    const content: any[] = [
-      { type: 'text', text }
-    ];
-
+    // Text block only if there is text: the API rejects empty text blocks
+    const content: Exclude<UserMessageParam['content'], string> = [];
+    if (text) {
+      content.push({ type: 'text', text });
+    }
     for (const img of images) {
-      content.push({
-        type: 'image',
-        source: img.source
-      });
+      content.push({ type: 'image', source: img.source });
     }
 
-    return {
-      role: 'user',
-      content
-    };
+    return { role: 'user', content };
   }
 }
