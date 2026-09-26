@@ -46,6 +46,18 @@ export interface QueryOutcome {
   aborted: boolean;
 }
 
+// Claude Code reports this (in stderr and the thrown error) when `resume` names a
+// session whose transcript no longer exists locally (pruned, deleted, other machine).
+const SESSION_NOT_FOUND_MARKER = "No conversation found with session ID";
+
+/** Thrown by run() when the session it was asked to resume no longer exists. */
+export class SessionNotFoundError extends Error {
+  constructor(public readonly sessionId: string) {
+    super(`No conversation found with session ID: ${sessionId}`);
+    this.name = "SessionNotFoundError";
+  }
+}
+
 const DISCORD_MCP_TOOLS = [
   "mcp__discord__discord_fetch_messages",
   "mcp__discord__discord_list_channels",
@@ -269,6 +281,10 @@ export class AIClient {
   async run(request: QueryRequest, handlers: QueryHandlers = {}): Promise<QueryOutcome> {
     const isCommand = typeof request.prompt === "string";
     const options = this.buildOptions(request, !isCommand);
+    let stderr = "";
+    options.stderr = (data) => {
+      stderr += data;
+    };
 
     const prompt = isCommand
       ? (request.prompt as string)
@@ -335,6 +351,13 @@ export class AIClient {
       if (error instanceof AbortError || request.abortController?.signal.aborted) {
         outcome.aborted = true;
         return outcome; // Expected cancellation (e.g. /clear or /rewind mid-query)
+      }
+      const message = (error as Error).message ?? "";
+      if (request.resume && (message.includes(SESSION_NOT_FOUND_MARKER) || stderr.includes(SESSION_NOT_FOUND_MARKER))) {
+        throw new SessionNotFoundError(request.resume);
+      }
+      if (stderr.trim()) {
+        this.logger.error("🤖 AI", "Subprocess stderr", stderr.trim().slice(-2000));
       }
       this.logger.error("🤖 AI", "Query error", (error as Error).message);
       throw error;

@@ -1,6 +1,6 @@
 import type { BotConfig } from "../config.js";
 import { SessionPersistence } from "../persistence/session-store.js";
-import { AIClient, type QueryHandlers, type QueryResult, type UserMessageParam } from "./ai-client.js";
+import { AIClient, SessionNotFoundError, type QueryHandlers, type QueryResult, type UserMessageParam } from "./ai-client.js";
 import type { PermissionHook } from "./permission-hook.js";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { ChunkedUpdater } from "../streaming/chunked-updater.js";
@@ -183,6 +183,8 @@ export class SessionManager {
 
     const aiClient = new AIClient(this.config, this.permissionHook, channelId, this.logger, this.discordMcpServer);
     let result: QueryResult | null = null;
+    // Whether anything reached Discord yet; a stale-session retry is only safe before that
+    let streamed = false;
 
     const handlers: QueryHandlers = {
       onSessionInit: (sessionId) => {
@@ -191,24 +193,41 @@ export class SessionManager {
         this.sessionStore.setSessionId(channelId, sessionId);
         this.sessionStore.save().catch(() => {});
       },
-      onText: (t) => updater.appendContent(t),
-      onToolUse: (name, input, id) => updater.onToolUse(name, input, id),
+      onText: (t) => {
+        streamed = true;
+        updater.appendContent(t);
+      },
+      onToolUse: (name, input, id) => {
+        streamed = true;
+        updater.onToolUse(name, input, id);
+      },
       onToolResult: (id, isError) => updater.onToolResult(id, isError),
       onResult: (r) => {
         result = r;
       },
     };
 
+    const prompt = this.buildUserMessage(text, images);
+
     try {
-      const outcome = await aiClient.run(
-        {
-          prompt: this.buildUserMessage(text, images),
-          resume: session.sdkSessionId || undefined,
-          resumeAt: this.sessionStore.getResumeAt(channelId),
-          abortController,
-        },
-        handlers
-      );
+      let outcome;
+      try {
+        outcome = await aiClient.run(
+          {
+            prompt,
+            resume: session.sdkSessionId || undefined,
+            resumeAt: this.sessionStore.getResumeAt(channelId),
+            abortController,
+          },
+          handlers
+        );
+      } catch (error) {
+        if (!(error instanceof SessionNotFoundError) || streamed) throw error;
+        await this.discardStaleSession(channelId, session, error.sessionId);
+        result = null;
+        // Retry once as a brand new conversation
+        outcome = await aiClient.run({ prompt, abortController }, handlers);
+      }
 
       // Record the turn boundary (even for aborted turns, so /rewind 1 drops a partial turn)
       if (outcome.lastEntryUuid && session.sdkSessionId) {
@@ -258,6 +277,10 @@ export class SessionManager {
           },
         }
       );
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) throw error;
+      await this.discardStaleSession(channelId, session, error.sessionId);
+      return { compacted: false, error: "The saved session no longer exists; the next message starts a new conversation." };
     } finally {
       if (session.abortController === abortController) {
         session.abortController = null;
@@ -274,6 +297,17 @@ export class SessionManager {
     await this.sessionStore.save();
     this.logger.info('💾 SESSION', `Compacted channel ${channelId.slice(-6)}`, `${preTokens} → ${postTokens ?? '?'} tokens`);
     return { compacted: true, preTokens, postTokens };
+  }
+
+  /**
+   * Forget a session whose transcript Claude Code can no longer find (pruned,
+   * deleted, or created on another machine), so the channel stops failing on it.
+   */
+  private async discardStaleSession(channelId: string, session: ManagedSession, staleId: string): Promise<void> {
+    this.logger.warn('💾 SESSION', `Stale session for channel ${channelId.slice(-6)}, starting fresh`, staleId.slice(0, 8));
+    session.sdkSessionId = null;
+    this.sessionStore.clearSession(channelId);
+    await this.sessionStore.save();
   }
 
   async clearSession(channelId: string): Promise<void> {
